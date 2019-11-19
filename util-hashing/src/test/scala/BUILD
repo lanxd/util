@@ -1,15 +1,5 @@
-junit_tests(name='scala',
-  dependencies=[
-    '3rdparty/jvm/commons-codec',
-    '3rdparty/jvm/junit',
-    '3rdparty/jvm/org/mockito:mockito-all',
-    '3rdparty/jvm/org/scalacheck',
-    '3rdparty/jvm/org/scalatest',
-    'util/util-core/src/main/scala',
-    'util/util-hashing/src/main/scala',
-  ],
-  sources=rglobs('*.scala'),
-  resources=[
-    'util/util-hashing/src/test/resources'
-  ]
+target(
+    dependencies = [
+        "util/util-hashing/src/test/scala/com/twitter/hashing",
+    ],
 )

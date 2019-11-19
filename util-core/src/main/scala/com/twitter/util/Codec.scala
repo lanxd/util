@@ -1,5 +1,7 @@
 package com.twitter.util
 
+import scala.language.higherKinds
+
 trait EncoderCompanion {
 
   type Enc[T, S] <: Encoder[T, S]
@@ -23,7 +25,7 @@ trait Encoder[T, S] extends (T => S) {
    */
   def encode(t: T): S
 
-  def apply(t: T) = encode(t)
+  def apply(t: T): S = encode(t)
 }
 
 trait DecoderCompanion {
@@ -49,7 +51,7 @@ trait Decoder[T, S] {
    */
   def decode(s: S): T
 
-  def invert(s: S) = decode(s)
+  def invert(s: S): T = decode(s)
 }
 
 object Codec extends EncoderCompanion with DecoderCompanion {
@@ -60,10 +62,9 @@ object Codec extends EncoderCompanion with DecoderCompanion {
 /**
  * A base trait for all Codecs that translate a type T into a serialized form S
  */
-trait Codec[T, S] extends Bijection[T, S] with Encoder[T, S] with Decoder[T, S]
+trait Codec[T, S] extends Encoder[T, S] with Decoder[T, S]
 
 object BinaryCodec {
   def encode[T](t: T)(implicit enc: Codec[T, Array[Byte]]): Array[Byte] = enc.encode(t)
   def decode[T](a: Array[Byte])(implicit dec: Codec[T, Array[Byte]]): T = dec.decode(a)
 }
-

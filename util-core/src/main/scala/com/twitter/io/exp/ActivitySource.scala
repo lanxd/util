@@ -1,9 +1,8 @@
 package com.twitter.io.exp
 
-import com.twitter.conversions.time._
-import com.twitter.io.{InputStreamReader, Buf, Reader}
+import com.twitter.io.{Buf, BufReader, InputStreamReader}
 import com.twitter.util._
-import java.io.{FileInputStream, File}
+import java.io.{File, FileInputStream}
 import java.lang.ref.{ReferenceQueue, WeakReference}
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.HashMap
@@ -12,6 +11,7 @@ import java.util.HashMap
  * An ActivitySource provides access to observerable named variables.
  */
 trait ActivitySource[+T] {
+
   /**
    * Returns an [[com.twitter.util.Activity]] for a named T-typed variable.
    */
@@ -28,6 +28,7 @@ trait ActivitySource[+T] {
 }
 
 object ActivitySource {
+
   /**
    * A Singleton exception to indicate that an ActivitySource failed to find
    * a named variable.
@@ -38,7 +39,11 @@ object ActivitySource {
    * An ActivitySource for observing file contents. Once observed,
    * each file will be polled once per period.
    */
-  def forFiles(period: Duration = 1.minute)(implicit timer: Timer): ActivitySource[Buf] =
+  def forFiles(
+    period: Duration = Duration.fromSeconds(60)
+  )(
+    implicit timer: Timer
+  ): ActivitySource[Buf] =
     new CachingActivitySource(new FilePollingActivitySource(period)(timer))
 
   /**
@@ -50,8 +55,9 @@ object ActivitySource {
     new CachingActivitySource(new ClassLoaderActivitySource(cl))
 
   private[ActivitySource] class OrElse[T, U >: T](
-      primary: ActivitySource[T], failover: ActivitySource[U])
-    extends ActivitySource[U] {
+    primary: ActivitySource[T],
+    failover: ActivitySource[U])
+      extends ActivitySource[U] {
     def get(name: String): Activity[U] = {
       primary.get(name) transform {
         case Activity.Failed(_) => failover.get(name)
@@ -66,7 +72,6 @@ object ActivitySource {
  * underlying ActivitySource.
  */
 class CachingActivitySource[T](underlying: ActivitySource[T]) extends ActivitySource[T] {
-  import com.twitter.io.exp.ActivitySource._
 
   private[this] val refq = new ReferenceQueue[Activity[T]]
   private[this] val forward = new HashMap[String, WeakReference[Activity[T]]]
@@ -109,10 +114,12 @@ class CachingActivitySource[T](underlying: ActivitySource[T]) extends ActivitySo
 /**
  * An ActivitySource for observing the contents of a file with periodic polling.
  */
-class FilePollingActivitySource private[exp](
+class FilePollingActivitySource private[exp] (
   period: Duration,
   pool: FuturePool
-)(implicit timer: Timer) extends ActivitySource[Buf] {
+)(
+  implicit timer: Timer)
+    extends ActivitySource[Buf] {
 
   private[exp] def this(period: Duration)(implicit timer: Timer) =
     this(period, FuturePool.unboundedPool)
@@ -127,8 +134,11 @@ class FilePollingActivitySource private[exp](
         if (file.exists()) {
           pool {
             val reader = new InputStreamReader(
-              new FileInputStream(file), InputStreamReader.DefaultMaxBufferSize, pool)
-            Reader.readAll(reader) respond {
+              new FileInputStream(file),
+              InputStreamReader.DefaultMaxBufferSize,
+              pool
+            )
+            BufReader.readAll(reader) respond {
               case Return(buf) =>
                 value() = Activity.Ok(buf)
               case Throw(cause) =>
@@ -155,8 +165,8 @@ class FilePollingActivitySource private[exp](
 /**
  * An ActivitySource for ClassLoader resources.
  */
-class ClassLoaderActivitySource private[exp](classLoader: ClassLoader, pool: FuturePool)
-  extends ActivitySource[Buf] {
+class ClassLoaderActivitySource private[exp] (classLoader: ClassLoader, pool: FuturePool)
+    extends ActivitySource[Buf] {
 
   import com.twitter.io.exp.ActivitySource._
 
@@ -177,7 +187,7 @@ class ClassLoaderActivitySource private[exp](classLoader: ClassLoader, pool: Fut
             case stream =>
               val reader =
                 new InputStreamReader(stream, InputStreamReader.DefaultMaxBufferSize, pool)
-              Reader.readAll(reader) respond {
+              BufReader.readAll(reader) respond {
                 case Return(buf) =>
                   p.setValue(Activity.Ok(buf))
                 case Throw(cause) =>

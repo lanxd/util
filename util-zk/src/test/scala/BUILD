@@ -1,13 +1,6 @@
-junit_tests(name='scala',
-  dependencies=[
-    '3rdparty/jvm/org/apache/zookeeper',
-    '3rdparty/jvm/cglib',
-    '3rdparty/jvm/org/jmock',
-    '3rdparty/jvm/junit',
-    '3rdparty/jvm/org/mockito:mockito-all',
-    '3rdparty/jvm/org/scalatest',
-    'util/util-core/src/main/scala',
-    'util/util-zk/src/main/scala',
-  ],
-  sources=rglobs('*.scala')
+target(
+    dependencies = [
+        "util/util-zk/src/test/scala/com/twitter/zk",
+        "util/util-zk/src/test/scala/com/twitter/zk/coordination",
+    ],
 )

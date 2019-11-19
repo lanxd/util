@@ -5,7 +5,7 @@
  * not use this file except in compliance with the License. You may obtain
  * a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *     https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,19 +18,17 @@ package com.twitter.logging
 
 import java.util.{logging => javalog}
 
-class LazyLogRecord(
-  level: javalog.Level,
-  messageGenerator: => AnyRef
-) extends LogRecord(level, "") {
+class LazyLogRecord(level: javalog.Level, messageGenerator: => AnyRef)
+    extends LogRecord(level, "") {
 
-  override lazy val getMessage = messageGenerator.toString
+  override lazy val getMessage: String = messageGenerator.toString
 }
 
 /**
  * A lazy LogRecord that needs formatting
  */
 class LazyLogRecordUnformatted(level: javalog.Level, message: String, items: Any*)
-  extends LazyLogRecord(level, { message.format(items: _*) }) {
+    extends LazyLogRecord(level, { message.format(items: _*) }) {
   require(items.size > 0)
-  val preformatted = message
+  val preformatted: String = message
 }

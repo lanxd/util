@@ -1,23 +1,71 @@
 package com.twitter.util
 
+import java.lang.ref.WeakReference
 import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
 import scala.annotation.tailrec
-import scala.collection.generic.CanBuild
+import scala.collection.compat._
 import scala.collection.immutable.Queue
+import scala.language.higherKinds
 
 /**
- * Events are instantaneous values, defined only at particular
- * instants in time (cf. [[com.twitter.util.Var Vars]], which are
- * defined at all times). It is possible to view Events as the
- * discrete counterpart to [[com.twitter.util.Var Var]]'s continuous
- * nature.
+ * Events are emitters of values. They can be processed as if they were
+ * streams. Here's how to create one that emits Ints.
  *
- * Events are observed by registering [[com.twitter.util.Witness Witnesses]]
- * to which the Event's values are notified.
+ * {{{
+ * val ints = Event[Int]()
+ * }}}
+ *
+ * To listen to an Event stream for values, register a handler.
+ *
+ * {{{
+ * val you = ints.respond { n => println(s"$n for you") }
+ * }}}
+ *
+ * Handlers in Event-speak are called [[com.twitter.util.Witness Witnesses]].
+ * And, respond is equivalent to `register(Witness { ... })`, so we can also
+ * write:
+ *
+ * {{{
+ * val me = ints.register(Witness { n => println(s"$n for me") })
+ * }}}
+ *
+ * Registration is time-sensitive. Witnesses registered to an Event stream
+ * can't observe past values. In this way, Events are instantaneous. When the
+ * stream emits a value, it fans out to every Witness; if there are no
+ * Witnesses to that communication, whatever value it carried is lost.
+ *
+ * Events emit values, okay, but who decides what is emitted? The implementor
+ * of an Event decides!
+ *
+ * But there's another way: you can create an Event that is also a Witness.
+ * Remember, Witnesses are simply handlers that can receive a value. Their type
+ * is `T => Unit`. So an Event that you can send values to is also a Witness.
+ *
+ * The `ints` Event we created above is one of these. Watch:
+ *
+ * {{{
+ * scala> ints.notify(1)
+ * 1 for you
+ * 1 for me
+ * }}}
+ *
+ * We can also stop listening. This is important for resource cleanup.
+ *
+ * {{{
+ * scala> me.close()
+ * scala> ints.notify(2)
+ * 2 for you
+ * }}}
+ *
+ * In relation to [[com.twitter.util.Var Vars]], Events are instantaneous
+ * values, defined only at particular instants in time; whereas Vars are
+ * defined at all times. It is possible to view Events as the discrete
+ * counterpart to Var's continuous nature.
  *
  * Note: There is a Java-friendly API for this trait: [[com.twitter.util.AbstractEvent]].
  */
 trait Event[+T] { self =>
+
   /**
    * Register the given [[com.twitter.util.Witness Witness]] to
    * this Event. Witnesses are notified of new values until it is
@@ -26,8 +74,8 @@ trait Event[+T] { self =>
   def register(s: Witness[T]): Closable
 
   /**
-   * Observe this event with function `f`. Equivalent to
-   * `register(Witness(f))`.
+   * Observe this event with function `s`. Equivalent to
+   * `register(Witness(s))`.
    */
   final def respond(s: T => Unit): Closable = register(Witness(s))
 
@@ -37,8 +85,8 @@ trait Event[+T] { self =>
    * not apply are dropped; other values are transformed by `f`.
    */
   def collect[U](f: PartialFunction[T, U]): Event[U] = new Event[U] {
-    def register(s: Witness[U]) =
-      self respond { t =>
+    def register(s: Witness[U]): Closable =
+      self.respond { t =>
         f.runWith(s.notify)(t)
       }
   }
@@ -62,12 +110,14 @@ trait Event[+T] { self =>
    * to the derived event.
    */
   def foldLeft[U](z: U)(f: (U, T) => U): Event[U] = new Event[U] {
-    def register(s: Witness[U]) = {
+    def register(s: Witness[U]): Closable = {
       var a = z
-      val mu = new{}
-      self respond Function.synchronizeWith(mu) { t  =>
-        a = f(a, t)
-        s.notify(a)
+      val mu = new Object()
+      self.respond {
+        Function.synchronizeWith(mu) { t =>
+          a = f(a, t)
+          s.notify(a)
+        }
       }
     }
   }
@@ -80,12 +130,12 @@ trait Event[+T] { self =>
    */
   def sliding(n: Int): Event[Seq[T]] = new Event[Seq[T]] {
     require(n > 0)
-    def register(s: Witness[Seq[T]]) = {
-      val mu = new{}
+    def register(s: Witness[Seq[T]]): Closable = {
+      val mu = new Object()
       var q = Queue.empty[T]
-      self respond { t =>
+      self.respond { t =>
         s.notify(mu.synchronized {
-          q = q enqueue t
+          q = q.enqueue(t)
           while (q.length > n) {
             val (_, q1) = q.dequeue
             q = q1
@@ -101,15 +151,15 @@ trait Event[+T] { self =>
    * to each element in this Event.
    */
   def mergeMap[U](f: T => Event[U]): Event[U] = new Event[U] {
-    def register(s: Witness[U]) = {
+    def register(s: Witness[U]): Closable = {
       @volatile var inners = Nil: List[Closable]
-      val outer = self respond { el =>
+      val outer = self.respond { el =>
         inners.synchronized { inners ::= f(el).register(s) }
       }
 
       Closable.make { deadline =>
         outer.close(deadline) before {
-          Closable.all(inners:_*).close(deadline)
+          Closable.all(inners: _*).close(deadline)
         }
       }
     }
@@ -119,9 +169,13 @@ trait Event[+T] { self =>
    * Merge two Events of different types.
    */
   def select[U](other: Event[U]): Event[Either[T, U]] = new Event[Either[T, U]] {
-    def register(s: Witness[Either[T, U]]) = Closable.all(
-      self.register(s comap { t => Left(t) }),
-      other.register(s comap { u => Right(u) })
+    def register(s: Witness[Either[T, U]]): Closable = Closable.all(
+      self.register(s.comap { t =>
+        Left(t)
+      }),
+      other.register(s.comap { u =>
+        Right(u)
+      })
     )
   }
 
@@ -135,33 +189,37 @@ trait Event[+T] { self =>
    * fashion.
    */
   def zip[U](other: Event[U]): Event[(T, U)] = new Event[(T, U)] {
-    def register(s: Witness[(T, U)]) = {
-      val mu = new{}
+    def register(s: Witness[(T, U)]): Closable = {
+      val mu = new Object()
       var state: Option[Either[Queue[T], Queue[U]]] = None
 
-      val left = self respond Function.synchronizeWith(mu) { t =>
-        state match {
-          case None =>
-            state = Some(Left(Queue(t)))
-          case Some(Left(q)) =>
-            state = Some(Left(q enqueue t))
-          case Some(Right(Queue(u, rest@_*))) =>
-            if (rest.isEmpty) state = None
-            else state = Some(Right(Queue(rest:_*)))
-            s.notify((t, u))
+      val left = self.respond {
+        Function.synchronizeWith(mu) { t =>
+          state match {
+            case None =>
+              state = Some(Left(Queue(t)))
+            case Some(Left(q)) =>
+              state = Some(Left(q enqueue t))
+            case Some(Right(Queue(u, rest @ _*))) =>
+              if (rest.isEmpty) state = None
+              else state = Some(Right(Queue(rest: _*)))
+              s.notify((t, u))
+          }
         }
       }
 
-      val right = other respond Function.synchronizeWith(mu) { u =>
-        state match {
-          case None =>
-            state = Some(Right(Queue(u)))
-          case Some(Right(q)) =>
-            state = Some(Right(q enqueue u))
-          case Some(Left(Queue(t, rest@_*))) =>
-            if (rest.isEmpty) state = None
-            else state = Some(Left(Queue(rest:_*)))
-            s.notify((t, u))
+      val right = other.respond {
+        Function.synchronizeWith(mu) { u =>
+          state match {
+            case None =>
+              state = Some(Right(Queue(u)))
+            case Some(Right(q)) =>
+              state = Some(Right(q enqueue u))
+            case Some(Left(Queue(t, rest @ _*))) =>
+              if (rest.isEmpty) state = None
+              else state = Some(Left(Queue(rest: _*)))
+              s.notify((t, u))
+          }
         }
       }
 
@@ -174,36 +232,39 @@ trait Event[+T] { self =>
    * last value in each underlying event.
    */
   def joinLast[U](other: Event[U]): Event[(T, U)] = new Event[(T, U)] {
-    def register(s: Witness[(T, U)]) = {
+    def register(s: Witness[(T, U)]): Closable = {
       import Event.JoinState
       import JoinState._
       var state: JoinState[T, U] = Empty
-      val mu = new{}
-      val left = self respond Function.synchronizeWith(mu) { t =>
-        state match {
-          case Empty | LeftHalf(_) =>
-            state = LeftHalf(t)
-          case RightHalf(u) =>
-            state = Full(t, u)
-            s.notify((t, u))
-          case Full(_, u) =>
-            state = Full(t, u)
-            s.notify((t, u))
+      val mu = new Object()
+      val left = self.respond {
+        Function.synchronizeWith(mu) { t =>
+          state match {
+            case Empty | LeftHalf(_) =>
+              state = LeftHalf(t)
+            case RightHalf(u) =>
+              state = Full(t, u)
+              s.notify((t, u))
+            case Full(_, u) =>
+              state = Full(t, u)
+              s.notify((t, u))
+          }
         }
       }
 
-      val right = other respond Function.synchronizeWith(mu) { u =>
-        state match {
-          case Empty | RightHalf(_) =>
-            state = RightHalf(u)
-          case LeftHalf(t) =>
-            state = Full(t, u)
-            s.notify((t, u))
-          case Full(t, _) =>
-            state = Full(t, u)
-            s.notify((t, u))
+      val right = other.respond {
+        Function.synchronizeWith(mu) { u =>
+          state match {
+            case Empty | RightHalf(_) =>
+              state = RightHalf(u)
+            case LeftHalf(t) =>
+              state = Full(t, u)
+              s.notify((t, u))
+            case Full(t, _) =>
+              state = Full(t, u)
+              s.notify((t, u))
+          }
         }
-
       }
 
       Closable.all(left, right)
@@ -215,10 +276,10 @@ trait Event[+T] { self =>
    * in the parent Event.
    */
   def take(howmany: Int): Event[T] = new Event[T] {
-    def register(s: Witness[T]) = {
+    def register(s: Witness[T]): Closable = {
       val n = new AtomicInteger(0)
       val c = new AtomicReference(Closable.nop)
-      c.set(self respond { t =>
+      c.set(self.respond { t =>
         if (n.incrementAndGet() <= howmany) s.notify(t)
         else c.getAndSet(Closable.nop).close()
       })
@@ -235,7 +296,7 @@ trait Event[+T] { self =>
    * from this and `other`.
    */
   def merge[U >: T](other: Event[U]): Event[U] = new Event[U] {
-    def register(s: Witness[U]) = {
+    def register(s: Witness[U]): Closable = {
       val c1 = self.register(s)
       val c2 = other.register(s)
       Closable.all(c1, c2)
@@ -243,14 +304,14 @@ trait Event[+T] { self =>
   }
 
   /**
-   * Progressively build a collection of events using the passed-in
+   * Progressively build any collection of events using the passed-in
    * builder. A value containing the current version of the collection
    * is notified for each incoming event.
    */
-  def build[U >: T, That](implicit cbf: CanBuild[U, That]) = new Event[That] {
-    def register(s: Witness[That]) = {
-      val b = cbf()
-      self respond { t =>
+  def buildAny[That](implicit factory: Factory[T, That]): Event[That] = new Event[That] {
+    def register(s: Witness[That]): Closable = {
+      val b = factory.newBuilder
+      self.respond { t =>
         b += t
         s.notify(b.result())
       }
@@ -258,15 +319,23 @@ trait Event[+T] { self =>
   }
 
   /**
+   * Progressively build a Seq of events using the passed-in
+   * builder. A value containing the current version of the collection
+   * is notified for each incoming event.
+   */
+  def build[U >: T, That <: Seq[U]](implicit factory: Factory[U, That]): Event[That] = buildAny(factory)
+
+  /**
    * A Future which is satisfied by the first value observed.
    */
   def toFuture(): Future[T] = {
     val p = new Promise[T]
     val c = register(Witness(p))
-    p setInterruptHandler { case exc =>
-      p.updateIfEmpty(Throw(exc))
+    p.setInterruptHandler {
+      case exc =>
+        p.updateIfEmpty(Throw(exc))
     }
-    p ensure { c.close() }
+    p.ensure { c.close() }
   }
 
   /**
@@ -274,20 +343,20 @@ trait Event[+T] { self =>
    * updates to the parent event. This can be used to perform
    * incremental computation on large data structures.
    */
-  def diff[CC[_]: Diffable, U](implicit toCC: T <:< CC[U]): Event[Diff[CC, U]] = new Event[Diff[CC, U]] {
-    def register(s: Witness[Diff[CC, U]]) = {
-      var left: CC[U] = Diffable.empty
-      self respond { t =>
-        synchronized {
-          val right = toCC(t)
-          val diff = Diffable.diff(left, right)
-          left = right
-          s.notify(diff)
+  def diff[CC[_]: Diffable, U](implicit toCC: T <:< CC[U]): Event[Diff[CC, U]] =
+    new Event[Diff[CC, U]] {
+      def register(s: Witness[Diff[CC, U]]): Closable = {
+        var left: CC[U] = Diffable.empty[CC, U]
+        self.respond { t =>
+          synchronized {
+            val right = toCC(t)
+            val diff = Diffable.diff(left, right)
+            left = right
+            s.notify(diff)
+          }
         }
       }
     }
-  }
-
 
   /**
    * Patch up an [[Event]] of differences (like those produced by
@@ -296,15 +365,34 @@ trait Event[+T] { self =>
    * Event[CC[T]]).diff.patch` is equivalent to `event`
    */
   def patch[CC[_]: Diffable, U](implicit ev: T <:< Diff[CC, U]): Event[CC[U]] = new Event[CC[U]] {
-    def register(s: Witness[CC[U]]) = {
-      var last: CC[U] = Diffable.empty
-      self respond { diff =>
+    def register(s: Witness[CC[U]]): Closable = {
+      var last: CC[U] = Diffable.empty[CC, U]
+      self.respond { diff =>
         synchronized {
           last = diff.patch(last)
           s.notify(last)
         }
       }
     }
+  }
+
+  /**
+   * Build a new Event by keeping only those Event values where the
+   * equality predicate `eq` applied to the current and new values
+   * does not match.
+   */
+  def dedupWith(eq: (T, T) => Boolean): Event[T] =
+    sliding(2).collect {
+      case Seq(init) => init
+      case Seq(current, next) if !eq(current, next) => next
+    }
+
+  /**
+   * Builds a new Event by keeping only the Events where
+   * the previous and current values are not `==` to each other.
+   */
+  def dedup: Event[T] = dedupWith { (a, b) =>
+    a == b
   }
 }
 
@@ -326,12 +414,12 @@ object Event {
   }
 
   /**
-   * A new Event of type T which is also a Witness.
+   * A new [[Event]] of type `T` which is also a [[Witness]].
    */
   def apply[T](): Event[T] with Witness[T] = new Event[T] with Witness[T] {
     private[this] val witnesses = new AtomicReference(Set.empty[Witness[T]])
 
-    def register(w: Witness[T]) = {
+    def register(w: Witness[T]): Closable = {
       casAdd(w)
       Closable.make { _ =>
         casRemove(w)
@@ -346,7 +434,7 @@ object Event {
      * receive notifications in the same order. Consequently it will block
      * until the witnesses are notified.
      */
-    def notify(t: T) = synchronized {
+    def notify(t: T): Unit = synchronized {
       val current = witnesses.get
       for (w <- current)
         w.notify(t)
@@ -376,10 +464,11 @@ object Event {
  * Note: There is a Java-friendly API for this trait: [[com.twitter.util.AbstractWitness]].
  */
 trait Witness[-N] { self =>
+
   /**
    * Notify this Witness with the given note.
    */
-  def notify(note: N)
+  def notify(note: N): Unit
 
   def comap[M](f: M => N): Witness[M] = new Witness[M] {
     def notify(m: M) = self.notify(f(m))
@@ -395,35 +484,71 @@ abstract class AbstractWitness[T] extends Witness[T]
  * Note: There is Java-friendly API for this object: [[com.twitter.util.Witnesses]].
  */
 object Witness {
+
   /**
-   * Create a Witness from an atomic reference.
+   * Create a [[Witness]] from an [[AtomicReference atomic reference]].
    */
   def apply[T](ref: AtomicReference[T]): Witness[T] = new Witness[T] {
-    def notify(t: T) = ref.set(t)
+    def notify(t: T): Unit = ref.set(t)
   }
 
   /**
-   * Create a Witness from a [[com.twitter.util.Promise Promise]].
+   * Create a [[Witness]] from a [[com.twitter.util.Promise Promise]].
    */
   def apply[T](p: Promise[T]): Witness[T] = new Witness[T] {
-    def notify(t: T) = p.updateIfEmpty(Return(t))
+    def notify(t: T): Unit = p.updateIfEmpty(Return(t))
   }
 
   /**
-   * Create a Witness from a function.
+   * Create a [[Witness]] from a [[Function1]].
    */
   def apply[T](f: T => Unit): Witness[T] = new Witness[T] {
-    def notify(t: T) = f(t)
-  }
-
-  def apply[T](u: Updatable[T]): Witness[T] = new Witness[T] {
-    def notify(t: T) = u() = t
+    def notify(t: T): Unit = f(t)
   }
 
   /**
-   * A Witness which prints to the console.
+   * Create a [[Witness]] from an [[Updatable]].
    */
-  val printer: Witness[Any] = Witness(println(_))
+  def apply[T](u: Updatable[T]): Witness[T] = new Witness[T] {
+    def notify(t: T): Unit = u() = t
+  }
+
+  /**
+   * Create a [[Witness]] which keeps only a `java.lang.ref.WeakReference`
+   * to the [[Function1]].
+   *
+   * @see [[Var.patch]] for example.
+   */
+  def weakReference[T](f: T => Unit): Witness[T] = new Witness[T] {
+    private[this] val weakRef = new WeakReference(f)
+
+    def notify(note: T): Unit = {
+      val fn = weakRef.get()
+      if (fn != null)
+        fn(note)
+    }
+  }
+
+  /**
+   * Create a [[Witness]] which keeps only a `java.lang.ref.WeakReference`
+   * to `u`.
+   *
+   * @see [[Var.apply]] for example.
+   */
+  def weakReference[T](u: Updatable[T]): Witness[T] = new Witness[T] {
+    private[this] val weakRef = new WeakReference(u)
+
+    def notify(note: T): Unit = {
+      val updatable = weakRef.get()
+      if (updatable != null)
+        updatable.update(note)
+    }
+  }
+
+  /**
+   * A [[Witness]] which prints to the console.
+   */
+  val printer: Witness[Any] = Witness(println(_: Any))
 }
 
 /**

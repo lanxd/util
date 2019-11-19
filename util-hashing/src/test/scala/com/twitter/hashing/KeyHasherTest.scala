@@ -1,33 +1,30 @@
 package com.twitter.hashing
 
-import scala.collection.mutable.ListBuffer
-
-import org.apache.commons.codec.binary.Base64
-import org.junit.runner.RunWith
-import org.scalatest.WordSpec
-import org.scalatest.junit.JUnitRunner
-
 import com.twitter.io.TempFile
+import java.util.Base64
+import org.scalatest.WordSpec
+import scala.collection.mutable.ListBuffer
+import java.nio.charset.StandardCharsets.UTF_8
 
-@RunWith(classOf[JUnitRunner])
 class KeyHasherTest extends WordSpec {
   def readResource(name: String) = {
     var lines = new ListBuffer[String]()
-    val src = scala.io.Source.fromFile(TempFile.fromResourcePath(getClass, "/"+name))
+    val src = scala.io.Source.fromFile(TempFile.fromResourcePath(getClass, "/" + name))
     src.getLines
   }
 
-  val base64 = new Base64()
-  def decode(str: String) = base64.decode(str)
+  val base64 = Base64.getDecoder
+  def decode(str: String) = base64.decode(str.getBytes(UTF_8))
 
   def testHasher(name: String, hasher: KeyHasher) = {
     val sources = readResource(name + "_source") map { decode(_) }
     val hashes = readResource(name + "_hashes")
     assert(sources.size > 0)
 
-    sources zip hashes foreach { case (source, hashAsString) =>
-      val hash = BigInt(hashAsString).toLong
-      assert(hasher.hashKey(source) === hash)
+    sources zip hashes foreach {
+      case (source, hashAsString) =>
+        val hash = BigInt(hashAsString).toLong
+        assert(hasher.hashKey(source) == hash)
     }
   }
 

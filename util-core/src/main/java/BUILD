@@ -1,12 +1,9 @@
-java_library(name='java',
-  provides = artifact(
-    org = 'com.twitter',
-    name = 'util-core-java',
-    repo = artifactory,
-  ),
-  sources=rglobs('*.java'),
-  dependencies=[
-    '3rdparty/jvm/org/scala-lang:scala-library',
-    'util/util-core/src/main/scala'
-  ]
+target(
+    dependencies = [
+        "util/util-core/src/main/java/com/twitter/concurrent",
+        "util/util-core/src/main/java/com/twitter/io",
+        "util/util-core/src/main/java/com/twitter/service",
+        "util/util-core/src/main/java/com/twitter/util",
+        "util/util-core/src/main/java/com/twitter/util/javainterop",
+    ],
 )

@@ -1,9 +1,5 @@
-junit_tests(name='java',
-  dependencies=[
-    '3rdparty/jvm/junit',
-    '3rdparty/jvm/org/scala-lang:scala-library',
-    'util/util-app/src/main/java',
-    'util/util-app/src/main/scala'
-  ],
-  sources=rglobs('*.java')
+target(
+    dependencies = [
+        "util/util-app/src/test/java/com/twitter/app",
+    ],
 )

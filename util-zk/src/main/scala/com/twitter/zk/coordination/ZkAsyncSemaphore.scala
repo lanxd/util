@@ -1,13 +1,12 @@
 package com.twitter.zk.coordination
 
+import com.twitter.concurrent.Permit
+import com.twitter.util.{Future, Promise, Return, Throw}
+import com.twitter.zk.{StateEvent, ZkClient, ZNode}
 import java.nio.charset.Charset
 import java.util.concurrent.{ConcurrentLinkedQueue, RejectedExecutionException}
-
+import org.apache.zookeeper.KeeperException.NoNodeException
 import org.apache.zookeeper.{CreateMode, KeeperException}
-
-import com.twitter.concurrent.Permit
-import com.twitter.util.{Future, Promise}
-import com.twitter.zk.{StateEvent, ZNode, ZkClient}
 
 /**
  * ZkAsyncSemaphore is a distributed semaphore with asynchronous execution.
@@ -36,7 +35,11 @@ import com.twitter.zk.{StateEvent, ZNode, ZkClient}
  * } // handle { ... }
  * }}}
  */
-class ZkAsyncSemaphore(zk: ZkClient, path: String, numPermits: Int, maxWaiters: Option[Int] = None) {
+class ZkAsyncSemaphore(
+  zk: ZkClient,
+  path: String,
+  numPermits: Int,
+  maxWaiters: Option[Int] = None) {
   import ZkAsyncSemaphore._
   require(numPermits > 0)
   require(maxWaiters.getOrElse(0) >= 0)
@@ -48,9 +51,9 @@ class ZkAsyncSemaphore(zk: ZkClient, path: String, numPermits: Int, maxWaiters: 
   private[this] val waitq = new ConcurrentLinkedQueue[(Promise[ZkSemaphorePermit], ZNode)]
 
   private[this] class ZkSemaphorePermit(node: ZNode) extends Permit {
-    val zkPath = node.path
-    val sequenceNumber = sequenceNumberOf(zkPath)
-    override def release() {
+    val zkPath: String = node.path
+    val sequenceNumber: Int = sequenceNumberOf(zkPath)
+    override def release(): Unit = {
       node.delete()
     }
   }
@@ -63,18 +66,23 @@ class ZkAsyncSemaphore(zk: ZkClient, path: String, numPermits: Int, maxWaiters: 
   def acquire(): Future[Permit] = synchronized {
     val futurePermit = futureSemaphoreNode flatMap { semaphoreNode =>
       zk(permitNodePathPrefix).create(
-      data = numPermits.toString.getBytes(Charset.forName("UTF8")),
-      mode = CreateMode.EPHEMERAL_SEQUENTIAL)
+        data = numPermits.toString.getBytes(Charset.forName("UTF8")),
+        mode = CreateMode.EPHEMERAL_SEQUENTIAL
+      )
     }
     futurePermit flatMap { permitNode =>
       val mySequenceNumber = sequenceNumberOf(permitNode.path)
 
       permitNodes() flatMap { permits =>
-        val sequenceNumbers = permits map { child => sequenceNumberOf(child.path) }
+        val sequenceNumbers = permits map { child =>
+          sequenceNumberOf(child.path)
+        }
         getConsensusNumPermits(permits) flatMap { consensusNumPermits =>
           if (consensusNumPermits != numPermits) {
             throw ZkAsyncSemaphore.PermitMismatchException(
-              "Attempted to create semaphore of %d permits when consensus is %d".format(numPermits, consensusNumPermits))
+              "Attempted to create semaphore of %d permits when consensus is %d"
+                .format(numPermits, consensusNumPermits)
+            )
           }
           if (permits.size < numPermits) {
             Future.value(new ZkSemaphorePermit(permitNode))
@@ -116,7 +124,9 @@ class ZkAsyncSemaphore(zk: ZkClient, path: String, numPermits: Int, maxWaiters: 
         zk onSessionEvent {
           case StateEvent.Expired => rejectWaitQueue()
           case StateEvent.Connected => {
-            permitNodes() map { nodes => checkWaiters(nodes) }
+            permitNodes() map { nodes =>
+              checkWaiters(nodes)
+            }
             monitorSemaphore(semaphoreNode)
           }
         }
@@ -132,7 +142,7 @@ class ZkAsyncSemaphore(zk: ZkClient, path: String, numPermits: Int, maxWaiters: 
    * @return A Future ZNode that is satisfied when the full path exists.
    */
   private[this] def safeCreate(path: String): Future[ZNode] = {
-    val nodes = path.split(pathSeparator) filter { ! _.isEmpty }
+    val nodes = path.split(pathSeparator) filter { !_.isEmpty }
     val head = Future.value(zk(pathSeparator + nodes.head))
     nodes.tail.foldLeft(head) { (futureParent, child) =>
       futureParent flatMap { parent =>
@@ -151,11 +161,11 @@ class ZkAsyncSemaphore(zk: ZkClient, path: String, numPermits: Int, maxWaiters: 
    *         The sequence includes both nodes that have entered the semaphore as well as waiters.
    */
   private[this] def permitNodes(): Future[Seq[ZNode]] = {
-    futureSemaphoreNode flatMap { semaphoreNode =>
+    futureSemaphoreNode.flatMap { semaphoreNode =>
       semaphoreNode.getChildren() map { zop =>
-        zop.children filter { child =>
+        zop.children.toSeq filter { child =>
           child.path.startsWith(permitNodePathPrefix)
-        } sortBy(child => sequenceNumberOf(child.path))
+        } sortBy (child => sequenceNumberOf(child.path))
       }
     }
   }
@@ -170,7 +180,9 @@ class ZkAsyncSemaphore(zk: ZkClient, path: String, numPermits: Int, maxWaiters: 
   private[this] def monitorSemaphore(node: ZNode) = {
     val monitor = node.getChildren.monitor()
     monitor foreach { tryChildren =>
-      tryChildren map { zop => checkWaiters(zop.children) }
+      tryChildren map { zop =>
+        checkWaiters(zop.children.toSeq)
+      }
     }
   }
 
@@ -192,20 +204,24 @@ class ZkAsyncSemaphore(zk: ZkClient, path: String, numPermits: Int, maxWaiters: 
     }
     val permits = nodes filter { child =>
       child.path.startsWith(permitNodePathPrefix)
-    } sortBy(child => sequenceNumberOf(child.path))
-    val ids = permits map { child => sequenceNumberOf(child.path) }
+    } sortBy (child => sequenceNumberOf(child.path))
+    val ids = permits map { child =>
+      sequenceNumberOf(child.path)
+    }
     val waitqIterator = waitq.iterator()
     while (waitqIterator.hasNext) {
       val (promise, permitNode) = waitqIterator.next()
       val id = sequenceNumberOf(permitNode.path)
       if (!permits.contains(permitNode)) {
-        promise.setException(PermitNodeException("Node for this permit has been deleted (client released, session expired, or tree was clobbered)."))
-      }
-      else if (permits.size < numPermits) {
+        promise.setException(
+          PermitNodeException(
+            "Node for this permit has been deleted (client released, session expired, or tree was clobbered)."
+          )
+        )
+      } else if (permits.size < numPermits) {
         promise.setValue(new ZkSemaphorePermit(permitNode))
         waitqIterator.remove()
-      }
-      else if (id <= ids(numPermits - 1)) {
+      } else if (id <= ids(numPermits - 1)) {
         promise.setValue(new ZkSemaphorePermit(permitNode))
         waitqIterator.remove()
       }
@@ -239,35 +255,50 @@ class ZkAsyncSemaphore(zk: ZkClient, path: String, numPermits: Int, maxWaiters: 
    */
   private[this] def getConsensusNumPermits(permits: Seq[ZNode]): Future[Int] = {
     Future.collect(permits map numPermitsOf) map { purportedNumPermits =>
-      val groupedByNumPermits = purportedNumPermits filter { i => 0 < i } groupBy { i => i }
-      val permitsToBelievers = groupedByNumPermits map { case (permits, believers) => (permits, believers.size) }
-      val (numPermitsInMax, numBelieversOfMax) = permitsToBelievers.maxBy { case (_, believers) => believers }
-      val cardinalityOfMax = permitsToBelievers.values.filter({ _ == numBelieversOfMax }).size
+      val groupedByNumPermits = purportedNumPermits filter { i =>
+        0 < i
+      } groupBy { i =>
+        i
+      }
+      val permitsToBelievers = groupedByNumPermits map {
+        case (permits, believers) => (permits, believers.size)
+      }
+      val (numPermitsInMax, numBelieversOfMax) = permitsToBelievers.maxBy {
+        case (_, believers) => believers
+      }
+      val cardinalityOfMax = permitsToBelievers.values.count(_ == numBelieversOfMax)
 
       if (cardinalityOfMax == 1) {
         // Consensus
         numPermitsInMax
-      }
-      else {
+      } else {
         // No consensus or this vote breaks consensus (two votes in discord)
         throw LackOfConsensusException(
-          "Cannot create semaphore with %d permits. Loss of consensus on %d permits.".format(numPermits, numPermitsInMax))
+          "Cannot create semaphore with %d permits. Loss of consensus on %d permits."
+            .format(numPermits, numPermitsInMax)
+        )
       }
     }
   }
 
   private[this] def sequenceNumberOf(path: String): Int = {
-    if (!path.startsWith(permitNodePathPrefix)) throw new Exception("Path does not match the permit node prefix")
+    if (!path.startsWith(permitNodePathPrefix))
+      throw new Exception("Path does not match the permit node prefix")
     path.substring(permitNodePathPrefix.length).toInt
   }
 
-  private[this] def numPermitsOf(node: ZNode): Future[Int] = {
-    node.getData() map { data =>
-      try {
-        new String(data.bytes, Charset.forName("UTF8")).toInt
-      } catch {
-        case err: NumberFormatException => -1
-      }
+  private[coordination] def numPermitsOf(node: ZNode): Future[Int] = {
+    node.getData().transform {
+      case Return(data: ZNode.Data) =>
+        try {
+          Future.value(new String(data.bytes, Charset.forName("UTF8")).toInt)
+        } catch {
+          case err: NumberFormatException => Future.value(-1)
+        }
+      case Throw(t: NoNodeException) =>
+        // This permit was released (i.e. after we got the list of permits).
+        Future.value(-1)
+      case Throw(t) => Future.exception(t)
     }
   }
 

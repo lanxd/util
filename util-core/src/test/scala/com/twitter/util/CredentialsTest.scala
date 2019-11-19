@@ -5,7 +5,7 @@
  * not use this file except in compliance with the License. You may obtain
  * a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *     https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,21 +16,18 @@
 
 package com.twitter.util
 
+import org.scalatest.FunSuite
+import org.scalatestplus.scalacheck.Checkers
 
-import org.junit.runner.RunWith
-import org.scalatest.WordSpec
-import org.scalatest.junit.JUnitRunner
+class CredentialsTest extends FunSuite with Checkers {
+  test("parse a simple auth file") {
+    val content = "username: root\npassword: hellokitty\n"
+    val result = Credentials(content)
+    assert(result == Map("username" -> "root", "password" -> "hellokitty"))
+  }
 
-@RunWith(classOf[JUnitRunner])
-class CredentialsTest extends WordSpec {
-  "Credentials" should {
-    "parse a simple auth file" in {
-      val content = "username: root\npassword: hellokitty\n"
-      assert(Credentials(content) === Map("username" -> "root", "password" -> "hellokitty"))
-    }
-
-    "parse a more complex auth file" in {
-      val content = """# random comment
+  test("parse a more complex auth file") {
+    val content = """# random comment
 
 username:root
 password  : last_0f-the/international:playboys
@@ -38,19 +35,34 @@ password  : last_0f-the/international:playboys
    moar :ok
 
         """
-      assert(Credentials(content) === Map(
+    assert(
+      Credentials(content) == Map(
         "username" -> "root",
         "password" -> "last_0f-the/international:playboys",
         "moar" -> "ok"
-      ))
-    }
+      )
+    )
+  }
 
-    "work for java peeps too" in {
-      val content = "username: root\npassword: hellokitty\n"
-      val jmap = new Credentials().read(content)
-      assert(jmap.size() === 2)
-      assert(jmap.get("username") === "root")
-      assert(jmap.get("password") === "hellokitty")
-    }
+  test("work for java peeps too") {
+    val content = "username: root\npassword: hellokitty\n"
+    val jmap = new Credentials().read(content)
+    assert(jmap.size() == 2)
+    assert(jmap.get("username") == "root")
+    assert(jmap.get("password") == "hellokitty")
+  }
+
+  test("handle \r\n line breaks") {
+    val content = "username: root\r\npassword: hellokitty\r\n"
+    assert(Credentials(content) == Map("username" -> "root", "password" -> "hellokitty"))
+  }
+
+  test("handle special chars") {
+    val pass = (0 to 127)
+      .map(_.toChar)
+      .filter(c => c != '\r' && c != '\n')
+      .mkString
+    val content = s"username: root\npassword: $pass\n"
+    assert(Credentials(content) == Map("username" -> "root", "password" -> pass))
   }
 }

@@ -1,10 +1,7 @@
 package com.twitter.util
 
-import org.junit.runner.RunWith
 import org.scalatest.WordSpec
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 class StateMachineTest extends WordSpec {
   "StateMachine" should {
     class StateMachineHelper {
@@ -13,7 +10,7 @@ class StateMachineTest extends WordSpec {
         case class State2() extends State
         state = State1()
 
-        def command1() {
+        def command1(): Unit = {
           transition("command1") {
             case State1() => state = State2()
           }

@@ -1,19 +1,17 @@
 package com.twitter.logging
 
-import java.util.logging.{Level => JLevel, LogRecord => JRecord}
-
-import org.junit.runner.RunWith
+import java.util.logging.{LogRecord => JRecord}
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 class LogRecordTest extends FunSuite {
   test("LogRecord should getMethod properly") {
     Logger.withLoggers(Nil) {
-      new LogRecordTestHelper({ r: JRecord => r.getSourceMethodName() }) {
-        def makingLogRecord() {
+      new LogRecordTestHelper({ r: JRecord =>
+        r.getSourceMethodName()
+      }) {
+        def makingLogRecord() = {
           logger.log(Level.INFO, "OK")
-          assert(handler.get === "makingLogRecord")
+          assert(handler.get == "makingLogRecord")
         }
         makingLogRecord()
       }
@@ -23,7 +21,7 @@ class LogRecordTest extends FunSuite {
   test("LogRecord should getClass properly") {
     Logger.withLoggers(Nil) {
       new Foo {
-        assert(handler.get === "com.twitter.logging.Foo")
+        assert(handler.get == "com.twitter.logging.Foo")
       }
     }
   }
@@ -38,8 +36,11 @@ abstract class LogRecordTestHelper(formats: JRecord => String) {
   logger.addHandler(handler)
 }
 
-class Foo extends LogRecordTestHelper({ r: JRecord => r.getSourceClassName() }) {
-  def makingLogRecord() {
+class Foo
+    extends LogRecordTestHelper({ r: JRecord =>
+      r.getSourceClassName()
+    }) {
+  def makingLogRecord(): Unit = {
     logger.log(Level.INFO, "OK")
   }
 

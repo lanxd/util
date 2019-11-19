@@ -57,6 +57,7 @@ package com.twitter.util
  */
 trait Disposable[+T] {
   def get: T
+
   /**
    * Dispose of a resource by deadline given.
    */
@@ -65,12 +66,11 @@ trait Disposable[+T] {
 }
 
 object Disposable {
-  def const[T](t: T) = new Disposable[T] {
+  def const[T](t: T): Disposable[T] = new Disposable[T] {
     def get = t
     def dispose(deadline: Time) = Future.value(())
   }
 }
-
 
 /**
  * `Managed[T]` is a resource of type `T` which lifetime is explicitly managed.
@@ -84,9 +84,10 @@ trait Managed[+T] { selfT =>
    * Create a new T, and pass it to the given operation (f).
    * After it completes, the resource is disposed.
    */
-  def foreach(f: T => Unit) {
+  def foreach(f: T => Unit): Unit = {
     val r = this.make()
-    try f(r.get) finally r.dispose()
+    try f(r.get)
+    finally r.dispose()
   }
 
   /**
@@ -109,16 +110,19 @@ trait Managed[+T] { selfT =>
       def dispose(deadline: Time) = {
         u.dispose(deadline) transform {
           case Return(_) => t.dispose(deadline)
-          case Throw(outer) => t.dispose transform {
-            case Throw(inner) => Future.exception(new DoubleTrouble(outer, inner))
-            case Return(_) => Future.exception(outer)
-          }
+          case Throw(outer) =>
+            t.dispose transform {
+              case Throw(inner) => Future.exception(new DoubleTrouble(outer, inner))
+              case Return(_) => Future.exception(outer)
+            }
         }
       }
     }
   }
 
-  def map[U](f: T => U): Managed[U] = flatMap { t => Managed.const(f(t)) }
+  def map[U](f: T => U): Managed[U] = flatMap { t =>
+    Managed.const(f(t))
+  }
 
   /**
    * Builds a resource.
@@ -127,13 +131,15 @@ trait Managed[+T] { selfT =>
 }
 
 object Managed {
-  def singleton[T](t: Disposable[T]) = new Managed[T] { def make() = t }
-  def const[T](t: T) = singleton(Disposable.const(t))
+  def singleton[T](t: Disposable[T]): Managed[T] = new Managed[T] { def make() = t }
+  def const[T](t: T): Managed[T] = singleton(Disposable.const(t))
 }
 
 class DoubleTrouble(cause1: Throwable, cause2: Throwable) extends Exception {
-  override def getStackTrace = cause1.getStackTrace
-  override def getMessage =
+  override def getStackTrace: Array[StackTraceElement] = cause1.getStackTrace
+  override def getMessage: String =
     "Double failure while disposing composite resource: %s \n %s".format(
-      cause1.getMessage, cause2.getMessage)
+      cause1.getMessage,
+      cause2.getMessage
+    )
 }

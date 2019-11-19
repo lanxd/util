@@ -10,6 +10,21 @@ import scala.Tuple3;
 import scala.runtime.BoxedUnit;
 
 public class FutureCompilationTest {
+
+  @Test
+  public void testBy() throws Exception {
+    Future<String> a = Future.value("23");
+    Future<String> b = a.by(new MockTimer(), Duration.fromSeconds(5).fromNow());
+    Assert.assertEquals(Await.result(a), Await.result(b));
+  }
+
+  @Test
+  public void testWithin() throws Exception {
+    Future<String> a = Future.value("23");
+    Future<String> b = a.within(new MockTimer(), Duration.fromSeconds(5));
+    Assert.assertEquals(Await.result(a), Await.result(b));
+  }
+
   @Test
   public void testFutureCastMap() throws Exception {
     Future<String> a = Future.value("23");
@@ -100,5 +115,13 @@ public class FutureCompilationTest {
 
     Assert.assertEquals("1", b.get("1"));
     Assert.assertEquals("2", b.get("2"));
+  }
+
+  @Test
+  public void testLowerFromTry() throws Exception {
+    Try<String> t = new Return<String>("ok");
+    Future<Try<String>> f = Future.value(t);
+    String s = Await.result(Futures.lowerFromTry(f));
+    Assert.assertEquals("ok", s);
   }
 }

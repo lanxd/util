@@ -5,7 +5,7 @@
  * not use this file except in compliance with the License. You may obtain
  * a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *     https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,26 +16,22 @@
 
 package com.twitter.logging
 
-import org.junit.runner.RunWith
-import org.scalatest.junit.JUnitRunner
+import com.twitter.conversions.DurationOps._
+import com.twitter.io.TempFolder
+import com.twitter.util.Time
 import org.scalatest.{BeforeAndAfter, WordSpec}
 
-import com.twitter.conversions.time._
-import com.twitter.util.{TempFolder, Time}
-
-
-@RunWith(classOf[JUnitRunner])
 class ThrottledHandlerTest extends WordSpec with BeforeAndAfter with TempFolder {
-  private var handler: StringHandler = null
+  private var handler: StringHandler = _
 
   "ThrottledHandler" should {
     before {
-      Logger.clearHandlers
+      Logger.clearHandlers()
       handler = new StringHandler(BareFormatter, None)
     }
 
     after {
-      Logger.clearHandlers
+      Logger.clearHandlers()
     }
 
     "throttle keyed log messages" in {
@@ -54,7 +50,17 @@ class ThrottledHandlerTest extends WordSpec with BeforeAndAfter with TempFolder 
         timeCtrl.advance(2.seconds)
         log.error("apple: %s", "done.")
 
-        assert(handler.get.split("\n").toList === List("apple: help!", "apple: help 2!", "orange: orange!", "orange: orange!", "apple: help 3!", "(swallowed 2 repeating messages)", "apple: done."))
+        assert(
+          handler.get.split("\n").toList == List(
+            "apple: help!",
+            "apple: help 2!",
+            "orange: orange!",
+            "orange: orange!",
+            "apple: help 3!",
+            "(swallowed 2 repeating messages)",
+            "apple: done."
+          )
+        )
       }
     }
 
@@ -72,7 +78,15 @@ class ThrottledHandlerTest extends WordSpec with BeforeAndAfter with TempFolder 
         time.advance(2.seconds)
         log.error("hello.")
 
-        assert(handler.get.split("\n").toList === List("apple: help!", "apple: help!", "apple: help!", "(swallowed 2 repeating messages)", "hello."))
+        assert(
+          handler.get.split("\n").toList == List(
+            "apple: help!",
+            "apple: help!",
+            "apple: help!",
+            "(swallowed 2 repeating messages)",
+            "hello."
+          )
+        )
       }
     }
   }

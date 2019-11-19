@@ -2,45 +2,71 @@ package com.twitter.util
 
 import com.twitter.concurrent.NamedPoolThreadFactory
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.{
-  CancellationException, ExecutionException, ExecutorService, Executors, RejectedExecutionException}
+import java.util.concurrent.{Future => _, _}
 import scala.runtime.NonLocalReturnControl
 
 /**
- * A FuturePool executes tasks asynchronously, typically using a pool
+ * A `FuturePool` executes tasks asynchronously, typically using a pool
  * of worker threads.
  */
 trait FuturePool {
+
+  /**
+   * Execute `f`, returning a [[Future]] that represents the outcome.
+   */
   def apply[T](f: => T): Future[T]
+
+  /**
+   * The approximate size of the pool.
+   *
+   * While this is implementation specific, this often represents
+   * the number of threads in the pool.
+   *
+   * @return -1 if this [[FuturePool]] implementation doesn't support this statistic.
+   */
+  def poolSize: Int = -1
+
+  /**
+   * The approximate number of tasks actively executing.
+   *
+   * @return -1 if this [[FuturePool]] implementation doesn't support this statistic.
+   */
+  def numActiveTasks: Int = -1
+
+  /**
+   * The approximate number of tasks that have completed execution.
+   *
+   * @return -1 if this [[FuturePool]] implementation doesn't support this statistic.
+   */
+  def numCompletedTasks: Long = -1L
 }
 
 /**
  * Note: There is a Java-friendly API for this object: [[com.twitter.util.FuturePools]].
  */
 object FuturePool {
+
   /**
-   * Creates a FuturePool backed by an ExecutorService.
-   *
-   * Note: for consumers from Java, there is not a java friendly api
-   * for using FuturePool.apply.  However, you can directly construct
-   * an ExecutorServiceFuturePool without problems.
+   * Creates a [[FuturePool]] backed by an `java.util.concurrent.ExecutorService`.
    */
-  def apply(executor: ExecutorService) =
+  def apply(executor: ExecutorService): ExecutorServiceFuturePool =
     new ExecutorServiceFuturePool(executor)
 
   /**
-   * Creates a FuturePool backed by an ExecutorService which propagates
-   * cancellation.
+   * Creates a [[FuturePool]] backed by an `java.util.concurrent.ExecutorService`
+   * which propagates cancellation.
    */
-  def interruptible(executor: ExecutorService) =
+  def interruptible(executor: ExecutorService): ExecutorServiceFuturePool =
     new InterruptibleExecutorServiceFuturePool(executor)
 
   /**
-   * A FuturePool that really isn't; it executes tasks immediately
+   * A [[FuturePool]] that really isn't; it executes tasks immediately
    * without waiting.  This can be useful in unit tests.
    */
-  val immediatePool = new FuturePool {
-    def apply[T](f: => T) = Future(f)
+  val immediatePool: FuturePool = new FuturePool {
+    def apply[T](f: => T): Future[T] = Future(f)
+
+    override def toString: String = "FuturePool.immediatePool"
   }
 
   private lazy val defaultExecutor = Executors.newCachedThreadPool(
@@ -51,20 +77,15 @@ object FuturePool {
    * The default future pool, using a cached threadpool, provided by
    * [[java.util.concurrent.Executors.newCachedThreadPool]]. Note
    * that this is intended for IO concurrency; computational
-   * parallelism typically requires special treatment.
-   */
-  @deprecated("use unboundedPool instead", "5.3.11")
-  lazy val defaultPool = unboundedPool
-
-  /**
-   * The default future pool, using a cached threadpool, provided by
-   * [[java.util.concurrent.Executors.newCachedThreadPool]]. Note
-   * that this is intended for IO concurrency; computational
    * parallelism typically requires special treatment. If an interrupt
    * is raised on a returned Future and the work has started, the worker
    * thread will not be interrupted.
    */
-  lazy val unboundedPool = new ExecutorServiceFuturePool(defaultExecutor)
+  lazy val unboundedPool: FuturePool =
+    new ExecutorServiceFuturePool(defaultExecutor) {
+      override def toString: String =
+        s"FuturePool.unboundedPool($defaultExecutor)"
+    }
 
   /**
    * The default future pool, using a cached threadpool, provided by
@@ -72,37 +93,42 @@ object FuturePool {
    * that this is intended for IO concurrency; computational
    * parallelism typically requires special treatment.  If an interrupt
    * is raised on a returned Future and the work has started, an attempt
-   * will will be made to interrupt the worker thread.
+   * will be made to interrupt the worker thread.
    */
-  lazy val interruptibleUnboundedPool = new InterruptibleExecutorServiceFuturePool(defaultExecutor)
+  lazy val interruptibleUnboundedPool: FuturePool =
+    new InterruptibleExecutorServiceFuturePool(defaultExecutor) {
+      override def toString: String =
+        s"FuturePool.interruptibleUnboundedPool($defaultExecutor)"
+    }
 }
 
-class InterruptibleExecutorServiceFuturePool(
-  executor: ExecutorService
-) extends ExecutorServiceFuturePool(executor, true)
+/**
+ * A [[FuturePool]] backed by a `java.util.concurrent.ExecutorService`
+ * that supports cancellation.
+ */
+class InterruptibleExecutorServiceFuturePool(executor: ExecutorService)
+    extends ExecutorServiceFuturePool(executor, true)
 
 /**
- * A FuturePool implementation backed by an ExecutorService.
+ * A [[FuturePool]] implementation backed by an `java.util.concurrent.ExecutorService`.
  *
  * If a piece of work has started, it cannot be cancelled and will not propagate
- * cancellation unless interruptible is true.
- *
- * If you want to propagate cancellation, use
+ * cancellation unless `interruptible` is true. If you want to propagate cancellation,
+ * use an [[InterruptibleExecutorServiceFuturePool]].
  */
-class ExecutorServiceFuturePool protected[this](
+class ExecutorServiceFuturePool protected[this] (
   val executor: ExecutorService,
-  val interruptible: Boolean
-) extends FuturePool
-{
+  val interruptible: Boolean)
+    extends FuturePool {
   def this(executor: ExecutorService) = this(executor, false)
 
   def apply[T](f: => T): Future[T] = {
     val runOk = new AtomicBoolean(true)
     val p = new Promise[T]
     val task = new Runnable {
-      val saved = Local.save()
+      private[this] val saved = Local.save()
 
-      def run() {
+      def run(): Unit = {
         // Make an effort to skip work in the case the promise
         // has been cancelled or already defined.
         if (!runOk.compareAndSet(true, false))
@@ -111,8 +137,7 @@ class ExecutorServiceFuturePool protected[this](
         val current = Local.save()
         Local.restore(saved)
 
-        try
-          p.updateIfEmpty(Try(f))
+        try p.updateIfEmpty(Try(f))
         catch {
           case nlrc: NonLocalReturnControl[_] =>
             val fnlrc = new FutureNonLocalReturnControl(nlrc)
@@ -125,11 +150,11 @@ class ExecutorServiceFuturePool protected[this](
       }
     }
 
-
     // This is safe: the only thing that can call task.run() is
     // executor, the only thing that can raise an interrupt is the
     // receiver of this value, which will then be fully initialized.
-    val javaFuture = try executor.submit(task) catch {
+    val javaFuture = try executor.submit(task)
+    catch {
       case e: RejectedExecutionException =>
         runOk.set(false)
         p.setException(e)
@@ -139,13 +164,28 @@ class ExecutorServiceFuturePool protected[this](
     p.setInterruptHandler {
       case cause =>
         if (interruptible || runOk.compareAndSet(true, false)) {
-          val exc = new CancellationException
-          exc.initCause(cause)
-          if (p.updateIfEmpty(Throw(exc)))
+          if (p.updateIfEmpty(Throw(cause)))
             javaFuture.cancel(true)
         }
     }
 
     p
   }
+
+  override def toString: String =
+    s"ExecutorServiceFuturePool(interruptible=$interruptible, executor=$executor)"
+
+  override def poolSize: Int = executor match {
+    case tpe: ThreadPoolExecutor => tpe.getPoolSize
+    case _ => super.poolSize
+  }
+  override def numActiveTasks: Int = executor match {
+    case tpe: ThreadPoolExecutor => tpe.getActiveCount
+    case _ => super.numActiveTasks
+  }
+  override def numCompletedTasks: Long = executor match {
+    case tpe: ThreadPoolExecutor => tpe.getCompletedTaskCount
+    case _ => super.numCompletedTasks
+  }
+
 }

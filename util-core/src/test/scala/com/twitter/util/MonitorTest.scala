@@ -1,36 +1,34 @@
 package com.twitter.util
 
-
-import org.junit.runner.RunWith
 import org.mockito.Matchers._
 import org.mockito.Mockito._
 import org.scalatest.WordSpec
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 
-object MonitorSpec {
+object MonitorTest {
   class MockMonitor extends Monitor {
-    def handle(cause: Throwable) = false
+    def handle(cause: Throwable): Boolean = false
   }
 }
 
-@RunWith(classOf[JUnitRunner])
 class MonitorTest extends WordSpec with MockitoSugar {
-  import MonitorSpec._
+  import MonitorTest._
 
   "Monitor#orElse" should {
     class MonitorOrElseHelper {
-      val m0, m1, m2 = spy(new MockMonitor)
-      Seq(m0, m1, m2) foreach { m => when(m.handle(any[Throwable])).thenReturn(true) }
+      val m0, m1, m2 = spy(new MockMonitor())
+      Seq(m0, m1, m2).foreach { m =>
+        when(m.handle(any[Throwable])).thenReturn(true)
+      }
       val exc = new Exception
-      val m = m0 orElse m1 orElse m2
+      val m = m0.orElse(m1).orElse(m2)
     }
 
     "stop at first successful handle" in {
       val h = new MonitorOrElseHelper
       import h._
 
-      assert(m.handle(exc) === true)
+      assert(m.handle(exc))
 
       verify(m0).handle(exc)
       verify(m1, never()).handle(exc)
@@ -38,7 +36,7 @@ class MonitorTest extends WordSpec with MockitoSugar {
 
       when(m0.handle(any[Throwable])).thenReturn(false)
 
-      assert(m.handle(exc) === true)
+      assert(m.handle(exc))
       verify(m0, times(2)).handle(exc)
       verify(m1).handle(exc)
       verify(m2, never()).handle(exc)
@@ -48,9 +46,13 @@ class MonitorTest extends WordSpec with MockitoSugar {
       val h = new MonitorOrElseHelper
       import h._
 
-      Seq(m0, m1, m2) foreach { m => when(m.handle(any[Throwable]))thenReturn(false) }
-      assert(m.handle(exc) === false)
-      Seq(m0, m1, m2) foreach { m => verify(m).handle(exc) }
+      Seq(m0, m1, m2) foreach { m =>
+        when(m.handle(any[Throwable])).thenReturn(false)
+      }
+      assert(!m.handle(exc))
+      Seq(m0, m1, m2) foreach { m =>
+        verify(m).handle(exc)
+      }
     }
 
     "wrap Monitor exceptions and pass them on" in {
@@ -60,7 +62,7 @@ class MonitorTest extends WordSpec with MockitoSugar {
       val rte = new RuntimeException("really bad news")
       when(m0.handle(any[Throwable])).thenThrow(rte)
 
-      assert(m.handle(exc) === true)
+      assert(m.handle(exc))
       verify(m0).handle(exc)
       verify(m1).handle(MonitorException(exc, rte))
     }
@@ -71,7 +73,7 @@ class MonitorTest extends WordSpec with MockitoSugar {
       val m0, m1 = spy(new MockMonitor)
       when(m0.handle(any[Throwable])).thenReturn(true)
       when(m1.handle(any[Throwable])).thenReturn(true)
-      val m = m0 andThen m1
+      val m = m0.andThen(m1)
       val exc = new Exception
     }
 
@@ -82,7 +84,7 @@ class MonitorTest extends WordSpec with MockitoSugar {
       when(m0.handle(any[Throwable])).thenReturn(true)
       when(m1.handle(any[Throwable])).thenReturn(true)
 
-      assert(m.handle(exc) === true)
+      assert(m.handle(exc))
       verify(m0).handle(exc)
       verify(m1).handle(exc)
     }
@@ -92,9 +94,9 @@ class MonitorTest extends WordSpec with MockitoSugar {
       import h._
 
       when(m0.handle(any[Throwable])).thenReturn(false)
-      assert(m.handle(exc) === true)
+      assert(m.handle(exc))
       when(m1.handle(any[Throwable])).thenReturn(false)
-      assert(m.handle(exc) === false)
+      assert(!m.handle(exc))
     }
 
     "wrap Monitor exceptions and pass them on" in {
@@ -104,7 +106,7 @@ class MonitorTest extends WordSpec with MockitoSugar {
       val rte = new RuntimeException("really bad news")
       when(m0.handle(any[Throwable])).thenThrow(rte)
 
-      assert(m.handle(exc) === true)
+      assert(m.handle(exc))
       verify(m0).handle(exc)
       verify(m1).handle(MonitorException(exc, rte))
     }
@@ -117,17 +119,38 @@ class MonitorTest extends WordSpec with MockitoSugar {
       when(m0.handle(any[Throwable])).thenThrow(rte)
       when(m1.handle(any[Throwable])).thenThrow(rte)
 
-      assert(m.handle(exc) === false)
+      assert(!m.handle(exc))
     }
   }
 
   "Monitor.get, Monitor.set()" should {
-    val m = spy(new MockMonitor)
-
+    val m = new MockMonitor
     "maintain current monitor" in Monitor.restoring {
-      when(m.handle(any[Throwable])).thenReturn(true)
       Monitor.set(m)
-      assert(Monitor.get === m)
+      assert(Monitor.get == m)
+    }
+  }
+
+  "Monitor.getOption, Monitor.setOption" should {
+    "maintain current monitor" in Monitor.restoring {
+      val mon = new Monitor {
+        def handle(cause: Throwable): Boolean = true
+      }
+      Monitor.setOption(Some(mon))
+      assert(Monitor.getOption.contains(mon))
+      assert(mon == Monitor.get)
+    }
+
+    "setOption of None restores the default" in Monitor.restoring {
+      val mon = new Monitor {
+        def handle(cause: Throwable): Boolean = true
+      }
+      Monitor.setOption(Some(mon))
+      assert(Monitor.getOption.contains(mon))
+
+      Monitor.setOption(None)
+      assert(Monitor.getOption.isEmpty)
+      assert(NullMonitor eq Monitor.get)
     }
   }
 
@@ -149,7 +172,7 @@ class MonitorTest extends WordSpec with MockitoSugar {
       Monitor.restoring {
         Monitor.set(mock[Monitor])
       }
-      assert(Monitor.get === orig)
+      assert(Monitor.get == orig)
     }
   }
 
@@ -171,24 +194,24 @@ class MonitorTest extends WordSpec with MockitoSugar {
       val h = new MonitorMkHelper
       import h._
 
-      assert(m.handle(new E1) === true)
-      assert(ran === true)
+      assert(m.handle(new E1))
+      assert(ran)
     }
 
     "handle E2" in {
       val h = new MonitorMkHelper
       import h._
 
-      assert(m.handle(new E2) === true)
-      assert(ran === true)
+      assert(m.handle(new E2))
+      assert(ran)
     }
 
     "not handle F1" in {
       val h = new MonitorMkHelper
       import h._
 
-      assert(m.handle(new F1) === false)
-      assert(ran === false)
+      assert(!m.handle(new F1))
+      assert(!ran)
     }
   }
 }

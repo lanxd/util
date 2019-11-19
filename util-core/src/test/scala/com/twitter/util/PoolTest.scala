@@ -1,25 +1,23 @@
 package com.twitter.util
 
 import scala.collection.mutable
+import scala.collection.Seq
 
-import org.junit.runner.RunWith
 import org.scalatest.WordSpec
-import org.scalatest.junit.JUnitRunner
+import com.twitter.conversions.DurationOps._
 
-import com.twitter.conversions.time._
-
-@RunWith(classOf[JUnitRunner])
 class PoolTest extends WordSpec {
+
   "SimplePool" should {
     "with a simple queue of items" should {
       "it reseves items in FIFO order" in {
         val queue = new mutable.Queue[Int] ++ List(1, 2, 3)
         val pool = new SimplePool(queue)
-        assert(Await.result(pool.reserve()) === 1)
-        assert(Await.result(pool.reserve()) === 2)
+        assert(Await.result(pool.reserve()) == 1)
+        assert(Await.result(pool.reserve()) == 2)
         pool.release(2)
-        assert(Await.result(pool.reserve()) === 3)
-        assert(Await.result(pool.reserve()) === 2)
+        assert(Await.result(pool.reserve()) == 3)
+        assert(Await.result(pool.reserve()) == 2)
         pool.release(1)
         pool.release(2)
         pool.release(3)
@@ -39,20 +37,20 @@ class PoolTest extends WordSpec {
         val h = new PoolSpecHelper
         import h._
 
-        assert(Await.result(pool.reserve()) === 2)
-        assert(Await.result(pool.reserve()) === 4)
-        assert(Await.result(pool.reserve()) === 6)
-        assert(Await.result(pool.reserve()) === 8)
+        assert(Await.result(pool.reserve()) == 2)
+        assert(Await.result(pool.reserve()) == 4)
+        assert(Await.result(pool.reserve()) == 6)
+        assert(Await.result(pool.reserve()) == 8)
         val promise = pool.reserve()
         intercept[TimeoutException] {
           Await.result(promise, 1.millisecond)
         }
         pool.release(8)
         pool.release(6)
-        assert(Await.result(promise) === 8)
-        assert(Await.result(pool.reserve()) === 6)
+        assert(Await.result(promise) == 8)
+        assert(Await.result(pool.reserve()) == 6)
         intercept[TimeoutException] {
-          Await.result(pool.reserve, 1.millisecond)
+          Await.result(pool.reserve(), 1.millisecond)
         }
       }
 
@@ -60,15 +58,15 @@ class PoolTest extends WordSpec {
         val h = new PoolSpecHelper
         import h._
 
-        assert(Await.result(pool.reserve()) === 2)
-        assert(Await.result(pool.reserve()) === 4)
-        assert(Await.result(pool.reserve()) === 6)
-        assert(Await.result(pool.reserve()) === 8)
+        assert(Await.result(pool.reserve()) == 2)
+        assert(Await.result(pool.reserve()) == 4)
+        assert(Await.result(pool.reserve()) == 6)
+        assert(Await.result(pool.reserve()) == 8)
         intercept[TimeoutException] {
           Await.result(pool.reserve(), 1.millisecond)
         }
         pool.dispose(2)
-        assert(Await.result(pool.reserve(), 1.millisecond) === 10)
+        assert(Await.result(pool.reserve(), 1.millisecond) == 10)
       }
     }
   }

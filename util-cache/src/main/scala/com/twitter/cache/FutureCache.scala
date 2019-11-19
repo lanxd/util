@@ -1,6 +1,6 @@
 package com.twitter.cache
 
-import com.twitter.util.{Future, Memoize}
+import com.twitter.util.Future
 import java.util.concurrent.ConcurrentMap
 
 /**
@@ -37,7 +37,7 @@ abstract class FutureCache[K, V] {
   /**
    * Unconditionally sets a value for a given key
    */
-  def set(key: K, value: Future[V])
+  def set(key: K, value: Future[V]): Unit
 
   /**
    * Evicts the contents of a `key` if the old value is `value`.
@@ -62,7 +62,8 @@ abstract class FutureCache[K, V] {
 abstract class FutureCacheProxy[K, V](underlying: FutureCache[K, V]) extends FutureCache[K, V] {
   def get(key: K): Option[Future[V]] = underlying.get(key)
 
-  def getOrElseUpdate(key: K)(compute: => Future[V]): Future[V] = underlying.getOrElseUpdate(key)(compute)
+  def getOrElseUpdate(key: K)(compute: => Future[V]): Future[V] =
+    underlying.getOrElseUpdate(key)(compute)
 
   def set(key: K, value: Future[V]): Unit = underlying.set(key, value)
 
@@ -80,11 +81,11 @@ abstract class FutureCacheProxy[K, V](underlying: FutureCache[K, V]) extends Fut
  * val map = (new java.util.concurrent.ConcurrentHashMap[K, V]()).asScala
  * val cachedFn: K => Future[V] = FutureCache.default(fn, FutureCache.fromMap(map))
  *
- * We typically recommend that you use Guava Caches.  There's an API that makes
- * it easy to use Guava caches, and can be found in the util-collection lib.
- * The object is called [[com.twitter.cache.guava.Guava$]].
+ * We typically recommend that you use `Caffeine` Caches via
+ * [[com.twitter.cache.caffeine.CaffeineCache]].
  */
 object FutureCache {
+
   /**
    * A [[com.twitter.cache.FutureCache]] backed by a
    * [[java.util.concurrent.ConcurrentMap]].
@@ -106,7 +107,9 @@ object FutureCache {
    * @see [[standard]] for the equivalent Java API.
    */
   def default[K, V](fn: K => Future[V], cache: FutureCache[K, V]): K => Future[V] =
-    AsyncMemoize(fn, new EvictingCache(cache)) andThen { f: Future[V] => f.interruptible() }
+    AsyncMemoize(fn, new EvictingCache(cache)) andThen { f: Future[V] =>
+      f.interruptible()
+    }
 
   /**
    * Alias for [[default]] which can be called from Java.

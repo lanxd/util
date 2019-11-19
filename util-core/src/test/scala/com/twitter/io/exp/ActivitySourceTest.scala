@@ -1,25 +1,22 @@
 package com.twitter.io.exp
 
 import com.twitter.io.Buf
-import com.twitter.util.{Activity, FuturePool, MockTimer, Time, Var}
+import com.twitter.util.{Activity, FuturePool, MockTimer, Time}
 import java.io.{File, ByteArrayInputStream}
-import org.junit.runner.RunWith
-import org.scalatest.junit.JUnitRunner
 import org.scalatest.{BeforeAndAfter, FunSuite}
 import scala.util.Random
 
-@RunWith(classOf[JUnitRunner])
 class ActivitySourceTest extends FunSuite with BeforeAndAfter {
 
-  val ok = new ActivitySource[String] {
+  val ok: ActivitySource[String] = new ActivitySource[String] {
     def get(varName: String) = Activity.value(varName)
   }
 
-  val failed = new ActivitySource[Nothing] {
+  val failed: ActivitySource[Nothing] = new ActivitySource[Nothing] {
     def get(varName: String) = Activity.exception(new Exception(varName))
   }
 
-  val tempFile = Random.alphanumeric.take(5).mkString
+  val tempFile: String = Random.alphanumeric.take(5).mkString
 
   def writeToTempFile(s: String): Unit = {
     val printer = new java.io.PrintWriter(new File(tempFile))
@@ -47,8 +44,8 @@ class ActivitySourceTest extends FunSuite with BeforeAndAfter {
     val a = failed.orElse(ok)
     val b = ok.orElse(failed)
 
-    assert("42" === a.get("42").sample())
-    assert("42" === b.get("42").sample())
+    assert("42" == a.get("42").sample())
+    assert("42" == b.get("42").sample())
   }
 
   test("CachingActivitySource") {
@@ -57,12 +54,12 @@ class ActivitySourceTest extends FunSuite with BeforeAndAfter {
     })
 
     val a = cache.get("a")
-    assert(a === cache.get("a"))
+    assert(a == cache.get("a"))
   }
 
   test("FilePollingActivitySource") {
     Time.withCurrentTimeFrozen { timeControl =>
-      import com.twitter.conversions.time._
+      import com.twitter.conversions.DurationOps._
       implicit val timer = new MockTimer
       val file = new FilePollingActivitySource(1.microsecond, FuturePool.immediatePool)
       val buf = file.get(tempFile)
@@ -78,13 +75,13 @@ class ActivitySourceTest extends FunSuite with BeforeAndAfter {
 
       timeControl.advance(2.microsecond)
       timer.tick()
-      assert(content === Some("foo bar"))
+      assert(content == Some("foo bar"))
 
       writeToTempFile("foo baz")
 
       timeControl.advance(2.microsecond)
       timer.tick()
-      assert(content === Some("foo baz"))
+      assert(content == Some("foo baz"))
 
       listen.close()
     }
@@ -99,6 +96,6 @@ class ActivitySourceTest extends FunSuite with BeforeAndAfter {
     val loader = new ClassLoaderActivitySource(classLoader, FuturePool.immediatePool)
     val bufAct = loader.get("bar baz")
 
-    assert("bar baz" === bufToString(bufAct.sample()))
+    assert("bar baz" == bufToString(bufAct.sample()))
   }
 }

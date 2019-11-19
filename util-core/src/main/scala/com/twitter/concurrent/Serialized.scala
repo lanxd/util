@@ -14,12 +14,12 @@ import com.twitter.util.{Future, Promise, Try}
  */
 trait Serialized {
   protected case class Job[T](promise: Promise[T], doItToIt: () => T) {
-    def apply() {
+    def apply(): Unit = {
       promise.update { Try { doItToIt() } }
     }
   }
 
-  private[this] val nwaiters = new AtomicInteger(0)
+  private[this] val nwaiters: AtomicInteger = new AtomicInteger(0)
   protected val serializedQueue: java.util.Queue[Job[_]] = new ConcurrentLinkedQueue[Job[_]]
 
   protected def serialized[A](f: => A): Future[A] = {

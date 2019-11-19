@@ -6,8 +6,9 @@ import scala.util.Random
  * An estimator for values of type T.
  */
 trait Estimator[T] {
+
   /** A scalar measurement `m` was taken */
-  def measure(m: T)
+  def measure(m: T): Unit
 
   /** Estimate the current value */
   def estimate: T
@@ -27,21 +28,21 @@ class Kalman(N: Int) {
    * Update the filter with measurement `m`
    * and measurement error `e`.
    */
-  def measure(m: Double, e: Double) {
-    val i = (n%N).toInt
+  def measure(m: Double, e: Double): Unit = {
+    val i = (n % N).toInt
     mbuf(i) = m
     ebuf(i) = e
 
     if (n == 0)
       est = m
 
-    est += weight*(m-est)
+    est += weight * (m - est)
     val mv = mvar
     val ev = evar
     if (mv + ev == 0)
       weight = 1D
     else
-      weight = mv / (mv+ev)
+      weight = mv / (mv + ev)
     n += 1
   }
 
@@ -55,7 +56,7 @@ class Kalman(N: Int) {
     else ebuf
   )
 
-  def estimate = est
+  def estimate: Double = est
 
   private[this] def variance(samples: Array[Double]): Double = {
     if (samples.length == 1)
@@ -63,11 +64,13 @@ class Kalman(N: Int) {
 
     val sum = samples.sum
     val mean = sum / samples.length
-    val diff = (samples map { x => (x-mean)*(x-mean) }).sum
-    diff/(samples.length-1)
+    val diff = (samples map { x =>
+      (x - mean) * (x - mean)
+    }).sum
+    diff / (samples.length - 1)
   }
 
-  override def toString =
+  override def toString: String =
     "Kalman<estimate=%f, weight=%f, mvar=%f, evar=%f>".format(estimate, weight, mvar, evar)
 }
 
@@ -77,14 +80,13 @@ class Kalman(N: Int) {
  * value).
  */
 class KalmanGaussianError(N: Int, range: Double) extends Kalman(N) with Estimator[Double] {
-  require(range >= 0D && range <1D)
+  require(range >= 0D && range < 1D)
   private[this] val rng = new Random
 
-  def measure(m: Double) {
-    measure(m, rng.nextGaussian()*range*m)
+  def measure(m: Double): Unit = {
+    measure(m, rng.nextGaussian() * range * m)
   }
 }
-
 
 /**
  * An estimator for weighted windows of means.
@@ -101,29 +103,29 @@ class WindowedMeans(N: Int, windows: Seq[(Int, Int)]) extends Estimator[Double] 
   private[this] def mean(from: Long, count: Int): Double = {
     require(count <= N && count > 0)
     val i = {
-      val x = ((from-count)%N).toInt
+      val x = ((from - count) % N).toInt
       if (x < 0) (x + N)
       else x
     }
-    val j = (from%N).toInt
+    val j = (from % N).toInt
     val sum =
       if (i == j) buf.sum
       else if (i < j) buf.slice(i, j).sum
       else buf.slice(i, N).sum + buf.slice(0, j).sum
-    sum/count
+    sum / count
   }
 
-  def measure(m: Double) {
+  def measure(m: Double): Unit = {
     if (n == 0)
       java.util.Arrays.fill(buf, m)
     else
-      buf((n%N).toInt) = m
+      buf((n % N).toInt) = m
     n += 1
   }
 
-  def estimate = {
+  def estimate: Double = {
     require(n > 0)
-    val weightedMeans = normalized map { case (w, i) => w*mean(n, i) }
+    val weightedMeans = normalized map { case (w, i) => w * mean(n, i) }
     weightedMeans.sum
   }
 }
@@ -132,17 +134,17 @@ class WindowedMeans(N: Int, windows: Seq[(Int, Int)]) extends Estimator[Double] 
  * Unix-like load average, an exponentially weighted moving average,
  * smoothed to the given interval (counted in number of
  * measurements).
- * See: http://web.mit.edu/saltzer/www/publications/instrumentation.html
+ * See: https://web.mit.edu/saltzer/www/publications/instrumentation.html
  */
 class LoadAverage(interval: Double) extends Estimator[Double] {
-  private[this] val a = math.exp(-1D/interval)
+  private[this] val a = math.exp(-1D / interval)
   private[this] var load = Double.NaN
 
-  def measure(m: Double) {
+  def measure(m: Double): Unit = {
     load =
       if (load.isNaN) m
-      else load*a + m*(1-a)
+      else load * a + m * (1 - a)
   }
 
-  def estimate = load
+  def estimate: Double = load
 }

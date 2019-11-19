@@ -9,23 +9,25 @@ import org.apache.zookeeper.{CreateMode, KeeperException, WatchedEvent}
 
 import com.twitter.concurrent.{Broker, Offer}
 import com.twitter.util.{Future, Return, Throw, Try}
+import com.twitter.logging.Logger
 
 /**
  * A handle to a ZNode attached to a ZkClient
  */
 trait ZNode {
+
   /** Absolute path of ZNode */
   val path: String
 
   protected[zk] val zkClient: ZkClient
-  protected[this] lazy val log = zkClient.log
+  protected[this] lazy val log: Logger = zkClient.log
 
-  override def hashCode = path.hashCode
+  override def hashCode: Int = path.hashCode
 
-  override def toString = "ZNode(%s)".format(path)
+  override def toString: String = "ZNode(%s)".format(path)
 
   /** ZNodes are equal if they share a path. */
-  override def equals(other: Any) = other match {
+  override def equals(other: Any): Boolean = other match {
     case z @ ZNode(_) => (z.hashCode == hashCode)
     case _ => false
   }
@@ -35,7 +37,7 @@ trait ZNode {
    */
 
   /** Return the ZkClient associated with this node. */
-  def client = zkClient
+  def client: ZkClient = zkClient
 
   /** Get a child node. */
   def apply(child: String): ZNode = ZNode(zkClient, childPath(child))
@@ -44,7 +46,8 @@ trait ZNode {
   def apply(stat: Stat): ZNode.Exists = ZNode.Exists(this, stat)
 
   /** Build a ZNode with its metadata and children. */
-  def apply(stat: Stat, children: Seq[String]): ZNode.Children = ZNode.Children(this, stat, children)
+  def apply(stat: Stat, children: Seq[String]): ZNode.Children =
+    ZNode.Children(this, stat, children)
 
   /** Build a ZNode with its metadata and data. */
   def apply(stat: Stat, bytes: Array[Byte]): ZNode.Data = ZNode.Data(this, stat, bytes)
@@ -79,15 +82,18 @@ trait ZNode {
    * Create this ZNode; or if a child name is specified create that child.
    */
   def create(
-      data: Array[Byte] = Array.empty[Byte],
-      acls: Seq[ACL]    = zkClient.acl,
-      mode: CreateMode  = zkClient.mode,
-      child: Option[String] = None): Future[ZNode] = {
+    data: Array[Byte] = Array.empty[Byte],
+    acls: Seq[ACL] = zkClient.acl,
+    mode: CreateMode = zkClient.mode,
+    child: Option[String] = None
+  ): Future[ZNode] = {
     val creatingPath = child map { "%s/%s".format(path, _) } getOrElse path
     zkClient.retrying { zk =>
       val result = new StringCallbackPromise
       zk.create(creatingPath, data, acls.asJava, mode, result, null)
-      result map { newPath => zkClient(newPath) }
+      result map { newPath =>
+        zkClient(newPath)
+      }
     }
   }
 
@@ -95,7 +101,9 @@ trait ZNode {
   def delete(version: Int = 0): Future[ZNode] = zkClient.retrying { zk =>
     val result = new UnitCallbackPromise
     zk.delete(path, version, result, null)
-    result map { _ => this }
+    result map { _ =>
+      this
+    }
   }
 
   /** Returns a Future that is satisfied with this ZNode with its metadata and data */
@@ -109,7 +117,9 @@ trait ZNode {
   def sync(): Future[ZNode] = zkClient.retrying { zk =>
     val result = new UnitCallbackPromise
     zk.sync(path, result, null)
-    result map { _ => this }
+    result map { _ =>
+      this
+    }
   }
 
   /** Provides access to this node's children. */
@@ -202,12 +212,19 @@ trait ZNode {
    */
   def monitorTree(): Offer[ZNode.TreeUpdate] = {
     val broker = new Broker[ZNode.TreeUpdate]
+
     /** Pipe events from a subtree's monitor to this broker. */
-    def pipeSubTreeUpdates(next: Offer[ZNode.TreeUpdate]) {
-      next.sync() flatMap(broker!) onSuccess { _ => pipeSubTreeUpdates(next) }
+    def pipeSubTreeUpdates(next: Offer[ZNode.TreeUpdate]): Unit = {
+      next.sync().flatMap(broker ! _).onSuccess { _ =>
+        pipeSubTreeUpdates(next)
+      }
     }
+
     /** Monitor a watch on this node. */
-    def monitorWatch(watch: Future[ZNode.Watch[ZNode.Children]], knownChildren: Set[ZNode]) {
+    def monitorWatch(
+      watch: Future[ZNode.Watch[ZNode.Children]],
+      knownChildren: Set[ZNode]
+    ): Unit = {
       log.debug("monitoring %s with %d known children", path, knownChildren.size)
       watch onFailure { e =>
         // An error occurred and there's not really anything we can do about it.
@@ -217,11 +234,13 @@ trait ZNode {
         // monitoring
         case ZNode.Watch(Return(zparent), eventUpdate) => {
           val children = zparent.children.toSet
-          val treeUpdate = ZNode.TreeUpdate(zparent,
-              added = children -- knownChildren,
-              removed = knownChildren -- children)
+          val treeUpdate = ZNode.TreeUpdate(
+            zparent,
+            added = children -- knownChildren,
+            removed = knownChildren -- children
+          )
           log.debug("updating %s with %d children", path, treeUpdate.added.size)
-          broker send(treeUpdate) sync() onSuccess { _ =>
+          broker.send(treeUpdate).sync.onSuccess { _ =>
             log.debug("updated %s with %d children", path, treeUpdate.added.size)
             treeUpdate.added foreach { z =>
               pipeSubTreeUpdates(z.monitorTree())
@@ -238,7 +257,7 @@ trait ZNode {
           // Tell the broker about the children we lost; otherwise, if there were no children,
           // this deletion should be reflected in a watch on the parent node, if one exists.
           if (knownChildren.size > 0) {
-            broker send(ZNode.TreeUpdate(this, removed = knownChildren)) sync()
+            broker.send(ZNode.TreeUpdate(this, removed = knownChildren)).sync
           } else {
             Future.Done
           } onSuccess { _ =>
@@ -257,7 +276,7 @@ trait ZNode {
 
   /** AuthFailed and Expired are unmonitorable. Everything else can be resumed. */
   protected[this] object MonitorableEvent {
-    def unapply(event: WatchedEvent) = event match {
+    def unapply(event: WatchedEvent): Boolean = event match {
       case StateEvent.AuthFailed() => false
       case StateEvent.Expired() => false
       case _ => true
@@ -269,26 +288,27 @@ trait ZNode {
  * ZNode utilities and return types.
  */
 object ZNode {
+
   /** Build a ZNode */
-  def apply(zk: ZkClient, _path: String) = new ZNode {
+  def apply(zk: ZkClient, _path: String): ZNode = new ZNode {
     PathUtils.validatePath(_path)
     protected[zk] val zkClient = zk
     val path = _path
   }
 
   /** matcher */
-  def unapply(znode: ZNode) = Some(znode.path)
+  def unapply(znode: ZNode): Some[String] = Some(znode.path)
 
   /** A matcher for KeeperExceptions that have a non-null path. */
   object Error {
-    def unapply(ke: KeeperException) = Option(ke.getPath)
+    def unapply(ke: KeeperException): Option[String] = Option(ke.getPath)
   }
 
   /** A ZNode with its Stat metadata. */
   trait Exists extends ZNode {
     val stat: Stat
 
-    override def equals(other: Any) = other match {
+    override def equals(other: Any): Boolean = other match {
       case Exists(p, s) => (p == path && s == stat)
       case o => super.equals(o)
     }
@@ -298,13 +318,13 @@ object ZNode {
   }
 
   object Exists {
-    def apply(znode: ZNode, _stat: Stat) = new Exists {
+    def apply(znode: ZNode, _stat: Stat): Exists = new Exists {
       val path = znode.path
       protected[zk] val zkClient = znode.zkClient
       val stat = _stat
     }
     def apply(znode: Exists): Exists = apply(znode, znode.stat)
-    def unapply(znode: Exists) = Some((znode.path, znode.stat))
+    def unapply(znode: Exists): Some[(String, Stat)] = Some((znode.path, znode.stat))
   }
 
   /** A ZNode with its Stat metadata and children znodes. */
@@ -312,7 +332,7 @@ object ZNode {
     val stat: Stat
     val children: Seq[ZNode]
 
-    override def equals(other: Any) = other match {
+    override def equals(other: Any): Boolean = other match {
       case Children(p, s, c) => (p == path && s == stat && c == children)
       case o => super.equals(o)
     }
@@ -328,7 +348,7 @@ object ZNode {
     def apply(znode: ZNode, stat: Stat, children: Seq[String]): Children = {
       apply(Exists(znode, stat), children.map(znode.apply))
     }
-    def unapply(z: Children) = Some((z.path, z.stat, z.children))
+    def unapply(z: Children): Some[(String, Stat, Seq[ZNode])] = Some((z.path, z.stat, z.children))
   }
 
   /** A ZNode with its Stat metadata and data. */
@@ -336,31 +356,33 @@ object ZNode {
     val stat: Stat
     val bytes: Array[Byte]
 
-    override def equals(other: Any) = other match {
+    override def equals(other: Any): Boolean = other match {
       case Data(p, s, b) => (p == path && s == stat && b == bytes)
       case o => super.equals(o)
     }
   }
 
   object Data {
-    def apply(znode: ZNode, _stat: Stat, _bytes: Array[Byte]) = new Data {
+    def apply(znode: ZNode, _stat: Stat, _bytes: Array[Byte]): Data = new Data {
       val path = znode.path
       protected[zk] val zkClient = znode.zkClient
       val stat = _stat
       val bytes = _bytes
     }
     def apply(znode: Exists, bytes: Array[Byte]): Data = apply(znode, znode.stat, bytes)
-    def unapply(znode: Data) = Some((znode.path, znode.stat, znode.bytes))
+    def unapply(znode: Data): Some[(String, Stat, Array[Byte])] =
+      Some((znode.path, znode.stat, znode.bytes))
   }
 
   case class Watch[T <: Exists](result: Try[T], update: Future[WatchedEvent]) {
+
     /** Map this Watch to one of another type. */
     def map[V <: Exists](toV: T => V): Watch[V] = new Watch(result.map(toV), update)
   }
 
   /** Describes an update to a node's children. */
   case class TreeUpdate(
-      parent: ZNode,
-      added: Set[ZNode] = Set.empty[ZNode],
-      removed: Set[ZNode] = Set.empty[ZNode])
+    parent: ZNode,
+    added: Set[ZNode] = Set.empty[ZNode],
+    removed: Set[ZNode] = Set.empty[ZNode])
 }

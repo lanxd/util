@@ -1,7 +1,12 @@
 package com.twitter.jvm
 
-import java.util.concurrent.{AbstractExecutorService, Callable, ScheduledExecutorService, ScheduledFuture, TimeUnit}
-
+import java.util.concurrent.{
+  AbstractExecutorService,
+  Callable,
+  ScheduledExecutorService,
+  ScheduledFuture,
+  TimeUnit
+}
 import scala.collection.mutable
 
 // A mostly empty implementation so that we can successfully
@@ -20,7 +25,12 @@ class MockScheduledExecutorService extends AbstractExecutorService with Schedule
   def shutdownNow() = throw new Exception
   def shutdown() = throw new Exception
 
-  def scheduleAtFixedRate(r: Runnable, initialDelay: Long, period: Long, unit: TimeUnit): ScheduledFuture[_] = {
+  def scheduleAtFixedRate(
+    r: Runnable,
+    initialDelay: Long,
+    period: Long,
+    unit: TimeUnit
+  ): ScheduledFuture[_] = {
     schedules += ((r, initialDelay, period, unit))
     null
   }

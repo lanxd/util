@@ -1,8 +1,5 @@
-scala_library(name='scala',
-  provides = scala_artifact(
-    org = 'com.twitter',
-    name = 'util-hashing',
-    repo = artifactory,
-  ),
-  sources=rglobs('*.scala'),
+target(
+    dependencies = [
+        "util/util-hashing/src/main/scala/com/twitter/hashing",
+    ],
 )

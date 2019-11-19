@@ -1,7 +1,6 @@
 package com.twitter.io
 
-import com.twitter.io.Writer.ClosableWriter
-import com.twitter.util.{Future, FuturePool, Promise, Return, Throw, Time}
+import com.twitter.util.{Future, FuturePool, Promise, Return, Throw, Time, ConstFuture}
 import java.io.OutputStream
 import java.util.concurrent.atomic.AtomicReference
 import scala.annotation.tailrec
@@ -9,11 +8,10 @@ import scala.annotation.tailrec
 /**
  * Construct a Writer from a given OutputStream.
  */
-private[io]
-class OutputStreamWriter(out: OutputStream, bufsize: Int) extends ClosableWriter {
+private[io] class OutputStreamWriter(out: OutputStream, bufsize: Int) extends Writer[Buf] {
   import com.twitter.io.OutputStreamWriter._
 
-  private[this] val done = new Promise[Unit]
+  private[this] val done = new Promise[StreamTermination]
   private[this] val writeOp = new AtomicReference[Buf => Future[Unit]](doWrite)
 
   // Byte array reused on each write to avoid multiple allocations.
@@ -21,7 +19,8 @@ class OutputStreamWriter(out: OutputStream, bufsize: Int) extends ClosableWriter
 
   @tailrec
   private[this] def drain(buf: Buf): Unit = {
-    if (buf.isEmpty) out.flush() else {
+    if (buf.isEmpty) out.flush()
+    else {
       // The source length is min(buf.length, bytes.length).
       val b = buf.slice(0, bytes.length)
       // Copy from the source to byte array.
@@ -33,33 +32,44 @@ class OutputStreamWriter(out: OutputStream, bufsize: Int) extends ClosableWriter
     }
   }
 
-  private[this] def doWrite: Buf => Future[Unit] = buf =>
-    FuturePool.interruptibleUnboundedPool { drain(buf) }
+  private[this] def doWrite: Buf => Future[Unit] =
+    buf => FuturePool.interruptibleUnboundedPool { drain(buf) }
 
   def write(buf: Buf): Future[Unit] =
-    if (done.isDefined) done else (
-      done or writeOp.getAndSet(_ => Future.exception(WriteExc))(buf)
-    ) transform {
-      case Return(_) =>
-        writeOp.set(doWrite)
-        Future.Done
+    if (done.isDefined) {
+      done.transform {
+        case Return(StreamTermination.FullyRead) => Future.exception(CloseExc)
+        case t => (new ConstFuture(t)).unit
+      }
+    } else
+      (
+        done or writeOp.getAndSet(_ => Future.exception(WriteExc))(buf)
+      ) transform {
+        case Return(_) =>
+          writeOp.set(doWrite)
+          Future.Done
 
-      case Throw(cause) =>
-        // We don't need to wait for the close, we care only that it is called.
-        if (cause != WriteExc) close()
-        Future.exception(cause)
-    }
+        case Throw(cause) =>
+          // We don't need to wait for the close, we care only that it is called.
+          if (cause != WriteExc) close()
+          Future.exception(cause)
+      }
 
   def fail(cause: Throwable): Unit =
     done.updateIfEmpty(Throw(cause))
 
-  def close(deadline: Time): Future[Unit] =
-    if (done.updateIfEmpty(Throw(CloseExc))) FuturePool.unboundedPool {
+  def close(deadline: Time): Future[Unit] = {
+    FuturePool.unboundedPool {
       out.close()
-    } else Future.Done
+      done.updateIfEmpty(StreamTermination.FullyRead.Return)
+    }
+    done.unit
+  }
+
+  def onClose: Future[StreamTermination] = done
 }
 
 private object OutputStreamWriter {
-  val WriteExc = new IllegalStateException("write while writing")
-  val CloseExc = new IllegalStateException("write after close")
+  val WriteExc: IllegalStateException = new IllegalStateException("write while writing")
+  val CloseExc: IllegalStateException = new IllegalStateException("write after close")
 }

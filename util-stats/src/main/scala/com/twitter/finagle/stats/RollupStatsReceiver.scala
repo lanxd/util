@@ -10,37 +10,36 @@ package com.twitter.finagle.stats
  * - "/errors/clientErrors"
  * - "/errors/clientErrors/java_net_ConnectException"
  */
-class RollupStatsReceiver(val self: StatsReceiver)
-  extends StatsReceiver with Proxy
-{
-  val repr = self.repr
+class RollupStatsReceiver(protected val self: StatsReceiver) extends StatsReceiverProxy {
 
   private[this] def tails[A](s: Seq[A]): Seq[Seq[A]] = {
     s match {
-      case s@Seq(_) =>
+      case s @ Seq(_) =>
         Seq(s)
 
-      case Seq(hd, tl@_*) =>
-        Seq(Seq(hd)) ++ (tails(tl) map { t => Seq(hd) ++ t })
+      case Seq(hd, tl @ _*) =>
+        Seq(Seq(hd)) ++ (tails(tl) map { t =>
+          Seq(hd) ++ t
+        })
     }
   }
 
-  def counter(names: String*) = new Counter {
+  override def counter(verbosity: Verbosity, names: String*): Counter = new Counter {
     private[this] val allCounters = BroadcastCounter(
-      tails(names) map (self.counter(_: _*))
+      tails(names).map(n => self.counter(verbosity, n: _*))
     )
-    def incr(delta: Int) = allCounters.incr(delta)
+    def incr(delta: Long): Unit = allCounters.incr(delta)
   }
 
-  def stat(names: String*) = new Stat {
+  override def stat(verbosity: Verbosity, names: String*): Stat = new Stat {
     private[this] val allStats = BroadcastStat(
-      tails(names) map (self.stat(_: _*))
+      tails(names).map(n => self.stat(verbosity, n: _*))
     )
-    def add(value: Float) = allStats.add(value)
+    def add(value: Float): Unit = allStats.add(value)
   }
 
-  def addGauge(names: String*)(f: => Float) = new Gauge {
-    private[this] val underlying = tails(names) map { self.addGauge(_: _*)(f) }
-    def remove() = underlying foreach { _.remove() }
+  override def addGauge(verbosity: Verbosity, names: String*)(f: => Float): Gauge = new Gauge {
+    private[this] val underlying = tails(names).map(n => self.addGauge(verbosity, n: _*)(f))
+    def remove(): Unit = underlying.foreach(_.remove())
   }
 }

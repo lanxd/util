@@ -1,9 +1,6 @@
-junit_tests(name='scala',
-  dependencies=[
-    '3rdparty/jvm/junit',
-    '3rdparty/jvm/org/mockito:mockito-all',
-    '3rdparty/jvm/org/scalatest',
-    'util/util-cache',
-  ],
-  sources=rglobs('*.scala')
+target(
+    dependencies = [
+        "util/util-cache/src/test/scala/com/twitter/cache",
+        "util/util-cache/src/test/scala/com/twitter/cache/caffeine",
+    ],
 )

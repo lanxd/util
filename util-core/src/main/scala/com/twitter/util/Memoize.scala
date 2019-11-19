@@ -1,16 +1,36 @@
 package com.twitter.util
 
+import java.lang.Thread
 import java.util.concurrent.{CountDownLatch => JCountDownLatch}
 
 import scala.annotation.tailrec
 
 object Memoize {
+  // A CountDownLatch that may not be awaited on by the thread that constructs it.
+  // Used to catch reentrant calls to Snappable apply which would deadlock the thread.
+  private[this] class GuardedCountDownLatch(count: Int) {
+    private[this] val owner = Thread.currentThread
+    private[this] val underlying = new JCountDownLatch(count)
+
+    def countDown(): Unit = underlying.countDown()
+
+    def await(): Unit = {
+      if (Thread.currentThread eq owner) {
+        throw new IllegalStateException(
+          s"${owner}: Attempted to wait on a value this thread is currently computing"
+        )
+      }
+      underlying.await()
+    }
+  }
+
   /**
    * A Snappable is a memoized function for which a
    * [[scala.collection.immutable.Map]] of the currently memoized computations
    * can be obtained.
    */
   trait Snappable[A, B] extends (A => B) {
+
     /**
      * Produces a snapshot of the currently memoized computations, as a
      * [[scala.collection.immutable.Map]]
@@ -47,12 +67,17 @@ object Memoize {
   def apply[A, B](f: A => B): A => B = snappable[A, B](f)
 
   /**
+   * Thread-safe memoization for a Function2.
+   */
+  def function2[A, B, C](f: (A, B) => C): (A, B) => C = scala.Function.untupled(apply(f.tupled))
+
+  /**
    * Produces [[com.twitter.util.Memoize.Snappable]], thread-safe
    * memoization for a function.
    */
   def snappable[A, B](f: A => B): Snappable[A, B] =
     new Snappable[A, B] {
-      private[this] var memo = Map.empty[A, Either[JCountDownLatch, B]]
+      private[this] var memo = Map.empty[A, Either[GuardedCountDownLatch, B]]
 
       def snap: Map[A, B] =
         synchronized(memo) collect {
@@ -71,7 +96,7 @@ object Memoize {
               // If it's missing, then claim the slot by putting in a
               // CountDownLatch that will be completed when the value is
               // available.
-              val latch = new JCountDownLatch(1)
+              val latch = new GuardedCountDownLatch(1)
               memo = memo + (a -> Left(latch))
 
               // The latch wrapped in Left indicates that the value
@@ -128,7 +153,7 @@ object Memoize {
         // is absent, call missing() to determine what to do.
         memo.get(a) match {
           case Some(Right(b)) => b
-          case _              => missing(a)
+          case _ => missing(a)
         }
     }
 }

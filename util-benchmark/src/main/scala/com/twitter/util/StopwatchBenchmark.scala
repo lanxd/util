@@ -17,11 +17,21 @@ class StopwatchBenchmark {
   def timeTime(state: StopwatchState): Duration = {
     state.elapsed()
   }
+
+  @Benchmark
+  def timeSystemNanos(): Long = {
+    Stopwatch.systemNanos()
+  }
+
+  @Benchmark
+  def timeTimeNanos(): Long = {
+    Stopwatch.timeNanos()
+  }
 }
 
 object StopwatchBenchmark {
   @State(Scope.Benchmark)
   class StopwatchState {
-    val elapsed = Stopwatch.start()
+    val elapsed: Stopwatch.Elapsed = Stopwatch.start()
   }
 }

@@ -1,14 +1,9 @@
 package com.twitter.concurrent
 
+import com.twitter.util.{Return, Await}
 import java.util.concurrent.atomic.AtomicInteger
-
-import org.junit.runner.RunWith
 import org.scalatest.WordSpec
-import org.scalatest.junit.JUnitRunner
 
-import com.twitter.util.Await
-
-@RunWith(classOf[JUnitRunner])
 class SpoolSourceTest extends WordSpec {
   "SpoolSource" should {
     class SpoolSourceHelper {
@@ -26,7 +21,7 @@ class SpoolSourceTest extends WordSpec {
       source.close()
       source.offer(4)
       source.offer(5)
-      assert(Await.result(futureSpool flatMap (_.toSeq)) === Seq(1, 2, 3))
+      assert(Await.result(futureSpool flatMap (_.toSeq)) == Seq(1, 2, 3))
     }
 
     "add values to the spool, ignoring values after offerAndClose" in {
@@ -39,8 +34,8 @@ class SpoolSourceTest extends WordSpec {
       source.offerAndClose(3)
       source.offer(4)
       source.offer(5)
-      assert(Await.result(futureSpool flatMap (_.toSeq)) === Seq(1, 2, 3))
-      assert(Await.result(source.closed) === ())
+      assert(Await.result(futureSpool flatMap (_.toSeq)) == Seq(1, 2, 3))
+      assert(Await.result(source.closed.liftToTry) == Return(()))
     }
 
     "return multiple Future Spools that only see values added later" in {
@@ -55,10 +50,10 @@ class SpoolSourceTest extends WordSpec {
       source.offer(3)
       val futureSpool4 = source()
       source.close()
-      assert(Await.result(futureSpool1 flatMap (_.toSeq)) === Seq(1, 2, 3))
-      assert(Await.result(futureSpool2 flatMap (_.toSeq)) === Seq(2, 3))
-      assert(Await.result(futureSpool3 flatMap (_.toSeq)) === Seq(3))
-      assert(Await.result(futureSpool4).isEmpty === true)
+      assert(Await.result(futureSpool1 flatMap (_.toSeq)) == Seq(1, 2, 3))
+      assert(Await.result(futureSpool2 flatMap (_.toSeq)) == Seq(2, 3))
+      assert(Await.result(futureSpool3 flatMap (_.toSeq)) == Seq(3))
+      assert(Await.result(futureSpool4).isEmpty == true)
     }
 
     "throw exception and close spool when exception is raised" in {
@@ -73,7 +68,7 @@ class SpoolSourceTest extends WordSpec {
       intercept[Exception] {
         Await.result(futureSpool1 flatMap (_.toSeq))
       }
-      assert(Await.result(futureSpool2).isEmpty === true)
+      assert(Await.result(futureSpool2).isEmpty == true)
     }
 
     "invoke registered interrupt handlers" in {
@@ -81,8 +76,9 @@ class SpoolSourceTest extends WordSpec {
 
       val fired = new AtomicInteger(0)
 
-      val isource = new SpoolSource[Int]({ case exc =>
-        fired.addAndGet(1)
+      val isource = new SpoolSource[Int]({
+        case exc =>
+          fired.addAndGet(1)
       })
 
       val a = isource()
@@ -90,25 +86,25 @@ class SpoolSourceTest extends WordSpec {
       val c = b.flatMap(_.tail)
       val d = c.flatMap(_.tail)
 
-      assert(fired.get() === 0)
+      assert(fired.get() == 0)
 
       a.raise(new Exception("sad panda 0"))
-      assert(fired.get() === 1)
+      assert(fired.get() == 1)
 
       isource.offer(1)
       b.raise(new Exception("sad panda 1"))
-      assert(fired.get() === 2)
+      assert(fired.get() == 2)
 
       isource.offer(2)
       c.raise(new Exception("sad panda 2"))
-      assert(fired.get() === 3)
+      assert(fired.get() == 3)
 
       // ignore exceptions once the source is closed
       isource.offerAndClose(3)
       d.raise(new Exception("sad panda 3"))
-      assert(fired.get() === 3)
+      assert(fired.get() == 3)
 
-      assert(Await.result(a flatMap (_.toSeq)) === Seq(1, 2, 3))
+      assert(Await.result(a flatMap (_.toSeq)) == Seq(1, 2, 3))
     }
   }
 }

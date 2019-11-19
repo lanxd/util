@@ -1,17 +1,12 @@
 package com.twitter.cache
 
-import com.twitter.util.{Await, Future, Time, Promise}
+import com.twitter.conversions.DurationOps._
+import com.twitter.util.{Await, Future, Promise, Time}
 import org.mockito.Mockito._
-import com.twitter.util.TimeConversions._
-import org.junit.runner.RunWith
-import org.scalatest.junit.JUnitRunner
 import org.scalatest._
-import org.scalatest.mock.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 
-@RunWith(classOf[JUnitRunner])
-class RefreshTest
-  extends FunSuite
-  with MockitoSugar {
+class RefreshTest extends FunSuite with MockitoSugar {
 
   class Ctx {
     val provider = mock[() => Future[Int]]
@@ -28,7 +23,7 @@ class RefreshTest
     import ctx._
 
     val result = memoizedFuture()
-    assert(Await.result(result) === 1)
+    assert(Await.result(result) == 1)
     verify(provider, times(1))()
   }
 
@@ -36,8 +31,8 @@ class RefreshTest
     val ctx = new Ctx
     import ctx._
 
-    assert(Await.result(memoizedFuture()) === 1)
-    assert(Await.result(memoizedFuture()) === 1)
+    assert(Await.result(memoizedFuture()) == 1)
+    assert(Await.result(memoizedFuture()) == 1)
     verify(provider, times(1))()
   }
 
@@ -46,12 +41,12 @@ class RefreshTest
     import ctx._
 
     Time.withTimeAt(Time.fromMilliseconds(0)) { timeControl =>
-      assert(Await.result(memoizedFuture()) === 1)
+      assert(Await.result(memoizedFuture()) == 1)
       timeControl.advance(ttl - 1.millis)
-      assert(Await.result(memoizedFuture()) === 1)
+      assert(Await.result(memoizedFuture()) == 1)
       timeControl.advance(2.millis)
-      assert(Await.result(memoizedFuture()) === 2)
-      assert(Await.result(memoizedFuture()) === 2)
+      assert(Await.result(memoizedFuture()) == 2)
+      assert(Await.result(memoizedFuture()) == 2)
       verify(provider, times(2))()
     }
   }
@@ -67,7 +62,7 @@ class RefreshTest
     intercept[RuntimeException] {
       Await.result(memoizedFuture())
     }
-    assert(Await.result(memoizedFuture()) === 2)
+    assert(Await.result(memoizedFuture()) == 2)
     verify(provider, times(2))()
   }
 
@@ -75,7 +70,7 @@ class RefreshTest
     val ctx = new Ctx
     import ctx._
 
-    val promise = Promise[Int]
+    val promise = Promise[Int]()
     reset(provider)
     when(provider())
       .thenReturn(promise)
@@ -85,8 +80,8 @@ class RefreshTest
 
     promise.setValue(1)
 
-    assert(Await.result(result1) === 1)
-    assert(Await.result(result2) === 1)
+    assert(Await.result(result1) == 1)
+    assert(Await.result(result2) == 1)
 
     verify(provider, times(1))()
   }
@@ -95,7 +90,7 @@ class RefreshTest
     val ctx = new Ctx
     import ctx._
 
-    val promise = Promise[Int]
+    val promise = Promise[Int]()
     reset(provider)
     when(provider()).thenReturn(promise)
 
@@ -110,13 +105,13 @@ class RefreshTest
     verify(provider, times(1))()
 
     reset(provider)
-    val promise2 = Promise[Int]
+    val promise2 = Promise[Int]()
     when(provider()).thenReturn(promise2)
 
     val result3 = memoizedFuture()
     promise2.setValue(2)
 
-    assert(Await.result(result3) === 2)
+    assert(Await.result(result3) == 2)
 
     verify(provider, times(1))()
   }

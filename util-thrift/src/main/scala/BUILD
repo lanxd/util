@@ -1,14 +1,5 @@
-scala_library(name='scala',
-  provides = scala_artifact(
-    org = 'com.twitter',
-    name = 'util-thrift',
-    repo = artifactory,
-  ),
-  dependencies=[
-    '3rdparty/jvm/com/fasterxml/jackson/core:jackson-databind',
-    '3rdparty/jvm/org/apache/thrift:libthrift-0.5.0',
-    '3rdparty/jvm/org/slf4j:slf4j-api',
-    'util/util-codec'
-  ],
-  sources=rglobs('*.scala'),
+target(
+    dependencies = [
+        "util/util-thrift/src/main/scala/com/twitter/util",
+    ],
 )

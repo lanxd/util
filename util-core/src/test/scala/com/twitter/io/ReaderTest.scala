@@ -1,489 +1,80 @@
 package com.twitter.io
 
-import com.twitter.concurrent.exp.AsyncStream
-import com.twitter.io.Reader.ReaderDiscarded
-import com.twitter.util.{Await, Future, Promise}
-import java.io.{ByteArrayOutputStream, OutputStream}
-import org.junit.runner.RunWith
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.prop.GeneratorDrivenPropertyChecks
+import com.twitter.concurrent.AsyncStream
+import com.twitter.conversions.DurationOps._
+import com.twitter.conversions.StorageUnitOps._
+import com.twitter.util.{Await, Awaitable, Future, Promise}
+import java.io.ByteArrayInputStream
+import java.nio.charset.{StandardCharsets => JChar}
+import java.util.concurrent.atomic.AtomicBoolean
+import org.mockito.Mockito._
+import org.scalacheck.{Arbitrary, Gen}
+import org.scalatest.concurrent.{Eventually, IntegrationPatience}
 import org.scalatest.{FunSuite, Matchers}
+import org.scalatestplus.scalacheck.ScalaCheckDrivenPropertyChecks
+import scala.collection.mutable.ArrayBuffer
 
-@RunWith(classOf[JUnitRunner])
-class ReaderTest extends FunSuite with GeneratorDrivenPropertyChecks with Matchers {
+class ReaderTest
+    extends FunSuite
+    with ScalaCheckDrivenPropertyChecks
+    with Matchers
+    with Eventually
+    with IntegrationPatience {
 
-  def arr(i: Int, j: Int) = Array.range(i, j).map(_.toByte)
-  def buf(i: Int, j: Int) = Buf.ByteArray.Owned(arr(i, j))
+  private def arr(i: Int, j: Int) = Array.range(i, j).map(_.toByte)
 
-  def toSeq(b: Option[Buf]) = b match {
-    case None => fail("Expected full buffer")
-    case Some(buf) =>
-      val a = new Array[Byte](buf.length)
-      buf.write(a, 0)
-      a.toSeq
-  }
+  private def buf(i: Int, j: Int) = Buf.ByteArray.Owned(arr(i, j))
 
-  def assertRead(r: Reader, i: Int, j: Int) {
-    val n = j-i
-    val f = r.read(n)
-    assertRead(f, i, j)
-  }
+  private def await[T](t: Awaitable[T]): T = Await.result(t, 5.seconds)
 
-  def undefined: AsyncStream[Reader] = throw new Exception
+  def undefined: AsyncStream[Reader[Buf]] = throw new Exception
 
-  private def assertRead(f: Future[Option[Buf]], i: Int, j: Int): Unit = {
-    assert(f.isDefined)
-    val b = Await.result(f)
-    assert(toSeq(b) === Seq.range(i, j))
-  }
+  def undefinedReaders: List[Reader[Buf]] = List.empty
 
-  def assertWrite(w: Writer, i: Int, j: Int) {
-    val buf = Buf.ByteArray.Owned(Array.range(i, j).map(_.toByte))
-    val f = w.write(buf)
-    assert(f.isDefined)
-    assert(Await.result(f) === ())
-  }
-
-  def assertWriteEmpty(w: Writer) {
-    val f = w.write(Buf.Empty)
-    assert(f.isDefined)
-    assert(Await.result(f) === ())
-  }
-
-  def assertDiscard(r: Reader) {
-    val f = r.read(1)
-    assert(!f.isDefined)
-    r.discard()
-    intercept[Reader.ReaderDiscarded] { Await.result(f) }
-  }
-
-  def assertReadWhileReading(r: Reader) {
-    val f = r.read(1)
-    intercept[IllegalStateException] { Await.result(r.read(1)) }
+  private def assertReadWhileReading(r: Reader[Buf]): Unit = {
+    val f = r.read()
+    intercept[IllegalStateException] {
+      await(r.read())
+    }
     assert(!f.isDefined)
   }
 
-  def assertFailed(r: Reader, p: Promise[Option[Buf]]) {
-    val f = r.read(1)
+  private def assertFailed(r: Reader[Buf], p: Promise[Option[Buf]]): Unit = {
+    val f = r.read()
     assert(!f.isDefined)
     p.setException(new Exception)
-    intercept[Exception] { Await.result(f) }
-    intercept[Exception] { Await.result(r.read(0)) }
-    intercept[Exception] { Await.result(r.read(1)) }
-  }
-
-  private def assertReadNone(r: Reader): Unit =
-    assert(Await.result(r.read(1)) === None)
-
-  private def assertReadEofAndClosed(rw: Reader.Writable): Unit = {
-    assertReadNone(rw)
-    assert(rw.close().isDone)
-  }
-
-  private val failedEx = new RuntimeException("ʕ •ᴥ•ʔ")
-
-  private def assertFailedEx(f: Future[_]): Unit = {
-    val thrown = intercept[RuntimeException] {
-      Await.result(f)
+    intercept[Exception] {
+      await(f)
     }
-    assert(thrown === failedEx)
-  }
-
-  test("Reader.copy - source and destination equality") {
-    forAll { (p: Array[Byte], q: Array[Byte], r: Array[Byte]) =>
-      val rw = Reader.writable()
-      val bos = new ByteArrayOutputStream
-
-      val w = Writer.fromOutputStream(bos, 31)
-      val f = Reader.copy(rw, w) ensure w.close()
-      val g =
-        rw.write(Buf.ByteArray.Owned(p)) before
-          rw.write(Buf.ByteArray.Owned(q)) before
-            rw.write(Buf.ByteArray.Owned(r)) before rw.close()
-
-      Await.result(Future.join(f, g))
-
-      val b = new ByteArrayOutputStream
-      b.write(p)
-      b.write(q)
-      b.write(r)
-      b.flush()
-
-      bos.toByteArray should equal(b.toByteArray)
+    intercept[Exception] {
+      await(r.read())
+    }
+    intercept[Exception] {
+      await(r.read())
     }
   }
 
-  test("Writer.fromOutputStream - close") {
-    val w = Writer.fromOutputStream(new ByteArrayOutputStream)
-    w.close()
-    intercept[IllegalStateException] { Await.result(w.write(Buf.Empty)) }
-  }
-
-  test("Writer.fromOutputStream - fail") {
-    val w = Writer.fromOutputStream(new ByteArrayOutputStream)
-    w.fail(new Exception)
-    intercept[Exception] { Await.result(w.write(Buf.Empty)) }
-  }
-
-  test("Writer.fromOutputStream - error") {
-    val os = new OutputStream {
-      def write(b: Int) { }
-      override def write(b: Array[Byte], n: Int, m: Int) { throw new Exception }
+  private def writeLoop[T](from: List[T], to: Writer[T]): Future[Unit] =
+    from match {
+      case h :: t => to.write(h).flatMap(_ => writeLoop(t, to))
+      case _ => to.close()
     }
-    val f = Writer.fromOutputStream(os).write(Buf.Utf8("."))
-    intercept[Exception] { Await.result(f) }
-  }
-
-  test("Writer.fromOutputStream") {
-    val closep = new Promise[Unit]
-    val writep = new Promise[Array[Byte]]
-    val os = new OutputStream {
-      def write(b: Int) { }
-      override def write(b: Array[Byte], n: Int, m: Int) { writep.setValue(b) }
-      override def close() { closep.setDone() }
-    }
-    val w = Writer.fromOutputStream(os)
-    assert(!writep.isDefined)
-    assert(!closep.isDefined)
-    Await.ready(w.write(Buf.Utf8(".")))
-    assert(writep.isDefined)
-    assert(!closep.isDefined)
-    Await.ready(w.close())
-    assert(closep.isDefined)
-  }
-
-  test("Reader.writable") {
-    val rw = Reader.writable()
-    val wf = rw.write(buf(0, 6))
-    assert(!wf.isDefined)
-    assertRead(rw, 0, 3)
-    assert(!wf.isDefined)
-    assertRead(rw, 3, 6)
-    assert(wf.isDefined)
-  }
-
-  test("Reader.readAll") {
-    val rw = Reader.writable()
-    val all = Reader.readAll(rw)
-    assert(!all.isDefined)
-    assertWrite(rw, 0, 3)
-    assertWrite(rw, 3, 6)
-    assert(!all.isDefined)
-    assertWriteEmpty(rw)
-    assert(!all.isDefined)
-    Await.result(rw.close())
-    assert(all.isDefined)
-    val buf = Await.result(all)
-    assert(toSeq(Some(buf)) === Seq.range(0, 6))
-  }
-
-  test("Reader.writable - write before read") {
-    val rw = Reader.writable()
-    val wf = rw.write(buf(0, 6))
-    assert(!wf.isDefined)
-    val rf = rw.read(6)
-    assert(rf.isDefined)
-    assert(toSeq(Await.result(rf)) === Seq.range(0, 6))
-  }
-
-  test("Reader.writable - partial read, then short read") {
-    val rw = Reader.writable()
-    val wf = rw.write(buf(0, 6))
-    assert(!wf.isDefined)
-    val rf = rw.read(4)
-    assert(rf.isDefined)
-    assert(toSeq(Await.result(rf)) === Seq.range(0, 4))
-
-    assert(!wf.isDefined)
-    val rf2 = rw.read(4)
-    assert(rf2.isDefined)
-    assert(toSeq(Await.result(rf2)) === Seq.range(4, 6))
-
-    assert(wf.isDefined)
-    assert(Await.result(wf) === ())
-  }
-
-  test("Reader.writeable - fail while reading") {
-    val rw = Reader.writable()
-    val rf = rw.read(6)
-    assert(!rf.isDefined)
-    val exc = new Exception
-    rw.fail(exc)
-    assert(rf.isDefined)
-    val exc1 = intercept[Exception] { Await.result(rf) }
-    assert(exc eq exc1)
-  }
-
-  test("Reader.writable - fail before reading") {
-    val rw = Reader.writable()
-    rw.fail(new Exception)
-    val rf = rw.read(10)
-    assert(rf.isDefined)
-    intercept[Exception] { Await.result(rf) }
-  }
-
-  test("Reader.writable - discard") {
-    val rw = Reader.writable()
-    rw.discard()
-    val rf = rw.read(10)
-    assert(rf.isDefined)
-    intercept[Reader.ReaderDiscarded] { Await.result(rf) }
-  }
-
-  test("Reader.writable - close") {
-    val rw = Reader.writable()
-    val wf = rw.write(buf(0, 6)) before rw.close()
-    assert(!wf.isDefined)
-    assert(Await.result(rw.read(6)) === Some(buf(0, 6)))
-    assert(!wf.isDefined)
-    assertReadEofAndClosed(rw)
-  }
-
-  test("Reader.writable - write then reads then close") {
-    val rw = Reader.writable()
-    val wf = rw.write(buf(0, 6))
-
-    assert(!wf.isDone)
-    assertRead(rw, 0, 3)
-    assert(!wf.isDone)
-    assertRead(rw, 3, 6)
-    assert(wf.isDone)
-
-    assert(!rw.close().isDone)
-    assertReadEofAndClosed(rw)
-  }
-
-  test("Reader.writable - read then write then close") {
-    val rw = Reader.writable()
-
-    val rf = rw.read(6)
-    assert(!rf.isDefined)
-
-    val wf = rw.write(buf(0, 6))
-    assert(wf.isDone)
-    assertRead(rf, 0, 6)
-
-    assert(!rw.close().isDone)
-    assertReadEofAndClosed(rw)
-  }
-
-
-  test("Reader.writable - write after fail") {
-    val rw = Reader.writable()
-    rw.fail(failedEx)
-
-    assertFailedEx(rw.write(buf(0, 6)))
-    val cf = rw.close()
-    assert(!cf.isDone)
-
-    assertFailedEx(rw.read(1))
-    assertFailedEx(cf)
-  }
-
-  test("Reader.writable - write after close") {
-    val rw = Reader.writable()
-    val cf = rw.close()
-    assert(!cf.isDone)
-    assertReadEofAndClosed(rw)
-    assert(cf.isDone)
-
-    intercept[IllegalStateException] {
-      Await.result(rw.write(buf(0, 1)))
-    }
-  }
-
-  test("Reader.writable - write smaller buf than read is waiting for") {
-    val rw = Reader.writable()
-    val rf = rw.read(6)
-    assert(!rf.isDefined)
-
-    val wf = rw.write(buf(0, 5))
-    assert(wf.isDone)
-    assertRead(rf, 0, 5)
-
-    assert(!rw.read(1).isDefined) // nothing pending
-    rw.close()
-    assertReadEofAndClosed(rw)
-  }
-
-  test("Reader.writable - write larger buf than read is waiting for") {
-    val rw = Reader.writable()
-    val rf = rw.read(3)
-    assert(!rf.isDefined)
-
-    val wf = rw.write(buf(0, 6))
-    assert(!wf.isDone)
-    assertRead(rf, 0, 3)
-    assert(!wf.isDone)
-
-    assertRead(rw.read(5), 3, 6) // read the rest
-    assert(wf.isDone)
-
-    assert(!rw.read(1).isDefined) // nothing pending to read
-    assert(rw.close().isDone)
-  }
-
-  test("Reader.writable - write while write pending") {
-    val rw = Reader.writable()
-    val wf = rw.write(buf(0, 1))
-    assert(!wf.isDone)
-
-    intercept[IllegalStateException] {
-      Await.result(rw.write(buf(0, 1)))
-    }
-
-    // the extraneous write should not mess with the 1st one.
-    assertRead(rw, 0, 1)
-  }
-
-  test("Reader.writable - read after fail") {
-    val rw = Reader.writable()
-    rw.fail(failedEx)
-    assertFailedEx(rw.read(1))
-  }
-
-  test("Reader.writable - read after close with no pending reads") {
-    val rw = Reader.writable()
-    assert(!rw.close().isDone)
-    assertReadEofAndClosed(rw)
-  }
-
-  test("Reader.writable - read after close with pending data") {
-    val rw = Reader.writable()
-
-    val wf = rw.write(buf(0, 1))
-    assert(!wf.isDone)
-
-    // close before the write is satisfied wipes the pending write
-    assert(!rw.close().isDone)
-    intercept[IllegalStateException] {
-      Await.result(wf)
-    }
-    assertReadEofAndClosed(rw)
-  }
-
-  test("Reader.writable - read while reading") {
-    val rw = Reader.writable()
-    val rf = rw.read(1)
-    intercept[IllegalStateException] {
-      Await.result(rw.read(1))
-    }
-    assert(!rf.isDefined)
-  }
-
-  test("Reader.writable - discard with pending read") {
-    val rw = Reader.writable()
-
-    val rf = rw.read(1)
-    rw.discard()
-
-    intercept[ReaderDiscarded] {
-      Await.result(rf)
-    }
-  }
-
-  test("Reader.writable - discard with pending write") {
-    val rw = Reader.writable()
-
-    val wf = rw.write(buf(0, 1))
-    rw.discard()
-
-    intercept[ReaderDiscarded] {
-      Await.result(wf)
-    }
-  }
-
-  test("Reader.writable - close not satisfied until writes are read") {
-    val rw = Reader.writable()
-    val cf = rw.write(buf(0, 6)).before(rw.close())
-    assert(!cf.isDone)
-
-    assertRead(rw, 0, 3)
-    assert(!cf.isDone)
-
-    assertRead(rw, 3, 6)
-    assert(!cf.isDone)
-    assertReadEofAndClosed(rw)
-  }
-
-  test("Reader.writable - close not satisfied until reads are fulfilled") {
-    val rw = Reader.writable()
-    val rf = rw.read(6)
-    val cf = rf.flatMap { _ => rw.close() }
-    assert(!rf.isDefined)
-    assert(!cf.isDone)
-
-    assert(rw.write(buf(0, 3)).isDone)
-
-    assertRead(rf, 0, 3)
-    assert(!cf.isDone)
-    assertReadEofAndClosed(rw)
-  }
-
-  test("Reader.writable - close while read pending") {
-    val rw = Reader.writable()
-    val rf = rw.read(6)
-    assert(!rf.isDefined)
-
-    assert(rw.close().isDone)
-    assert(rf.isDefined)
-  }
-
-  test("Reader.writable - close then close") {
-    val rw = Reader.writable()
-    assert(!rw.close().isDone)
-    assertReadEofAndClosed(rw)
-    assert(rw.close().isDone)
-    assertReadEofAndClosed(rw)
-  }
-
-  test("Reader.writable - close after fail") {
-    val rw = Reader.writable()
-    rw.fail(failedEx)
-    val cf = rw.close()
-    assert(!cf.isDone)
-
-    assertFailedEx(rw.read(1))
-    assertFailedEx(cf)
-  }
-
-  test("Reader.writable - close before fail") {
-    val rw = Reader.writable()
-    val cf = rw.close()
-    assert(!cf.isDone)
-
-    rw.fail(failedEx)
-    assert(!cf.isDone)
-
-    assertFailedEx(rw.read(1))
-    assertFailedEx(cf)
-  }
-
-  test("Reader.writable - close while write pending") {
-    val rw = Reader.writable()
-    val wf = rw.write(buf(0, 1))
-    assert(!wf.isDone)
-    val cf = rw.close()
-    assert(!cf.isDone)
-    intercept[IllegalStateException] {
-      Await.result(wf)
-    }
-    assertReadEofAndClosed(rw)
-  }
 
   test("Reader.concat") {
-    forAll { (ss: List[String]) =>
-      val readers = ss map { s => BufReader(Buf.Utf8(s)) }
-      val buf = Reader.readAll(Reader.concat(AsyncStream.fromSeq(readers)))
-      Await.result(buf) should equal(Buf.Utf8(ss.mkString))
+    forAll { ss: List[String] =>
+      val readers: List[Reader[String]] = ss.map(s => Reader.value(s))
+      val concatedReaders = Reader.concat(AsyncStream.fromSeq(readers))
+      val values = Reader.readAllItems(concatedReaders)
+      assert(await(values) == ss)
     }
   }
 
   test("Reader.concat - discard") {
     val p = new Promise[Option[Buf]]
-    val head = new Reader {
-      def read(n: Int) = p
-      def discard() = p.setException(new Reader.ReaderDiscarded)
+    val head = new Reader[Buf] {
+      def read(): Future[Option[Buf]] = p
+      def discard(): Unit = p.setException(new ReaderDiscardedException)
+      def onClose: Future[StreamTermination] = Future.never
     }
     val reader = Reader.concat(head +:: undefined)
     reader.discard()
@@ -492,9 +83,10 @@ class ReaderTest extends FunSuite with GeneratorDrivenPropertyChecks with Matche
 
   test("Reader.concat - read while reading") {
     val p = new Promise[Option[Buf]]
-    val head = new Reader {
-      def read(n: Int) = p
-      def discard() = p.setException(new Reader.ReaderDiscarded)
+    val head = new Reader[Buf] {
+      def read(): Future[Option[Buf]] = p
+      def discard(): Unit = p.setException(new ReaderDiscardedException)
+      def onClose: Future[StreamTermination] = Future.never
     }
     val reader = Reader.concat(head +:: undefined)
     assertReadWhileReading(reader)
@@ -502,27 +94,393 @@ class ReaderTest extends FunSuite with GeneratorDrivenPropertyChecks with Matche
 
   test("Reader.concat - failed") {
     val p = new Promise[Option[Buf]]
-    val head = new Reader {
-      def read(n: Int) = p
-      def discard() = p.setException(new Reader.ReaderDiscarded)
+    val head = new Reader[Buf] {
+      def read(): Future[Option[Buf]] = p
+      def discard(): Unit = p.setException(new ReaderDiscardedException)
+      def onClose: Future[StreamTermination] = Future.never
     }
     val reader = Reader.concat(head +:: undefined)
     assertFailed(reader, p)
   }
 
   test("Reader.concat - lazy tail") {
-    val head = new Reader {
-      def read(n: Int) = Future.exception(new Exception)
-      def discard() { }
+    val head = new Reader[Buf] {
+      def read(): Future[Option[Buf]] = Future.exception(new Exception)
+
+      def discard(): Unit = ()
+      def onClose: Future[StreamTermination] = Future.never
     }
     val p = new Promise[Unit]
-    def tail: AsyncStream[Reader] = {
+
+    def tail: AsyncStream[Reader[Buf]] = {
       p.setDone()
       AsyncStream.empty
     }
+
     val combined = Reader.concat(head +:: tail)
-    val buf = Reader.readAll(combined)
-    intercept[Exception] { Await.result(buf) }
+    val buf = Reader.readAllItems(combined)
+    intercept[Exception] {
+      await(buf)
+    }
     assert(!p.isDefined)
+  }
+
+  test("Reader.flatten") {
+    forAll { ss: List[String] =>
+      val readers: List[Reader[String]] = ss.map(s => Reader.value(s))
+      val value = Reader.readAllItems(Reader.flatten(Reader.fromSeq(readers)))
+      assert(await(value) == ss)
+    }
+  }
+
+  test("Reader#flatten") {
+    forAll { ss: List[String] =>
+      val readers: List[Reader[String]] = ss.map(s => Reader.value(s))
+      val buf = Reader.readAllItems((Reader.fromSeq(readers).flatten))
+      assert(await(buf) == ss)
+    }
+  }
+
+  test("Reader.flatten empty") {
+    val readers = Reader.flatten(Reader.fromSeq(undefinedReaders))
+    assert(await(readers.read()) == None)
+  }
+
+  test("Reader.flatten - discard") {
+    val p = new Promise[Option[Buf]]
+
+    val head = new Reader[Buf] {
+      def read(): Future[Option[Buf]] = p
+      def discard(): Unit = p.setException(new ReaderDiscardedException)
+      def onClose: Future[StreamTermination] = Future.never
+    }
+
+    val sourceReader = Reader.fromSeq(head +: undefinedReaders)
+    val reader = Reader.flatten(sourceReader)
+    reader.read()
+    reader.discard()
+    assert(p.isDefined)
+    assert(await(sourceReader.onClose) == StreamTermination.Discarded)
+  }
+
+  test("Reader.flatten - failed") {
+    val p = new Promise[Option[Buf]]
+    val head = new Reader[Buf] {
+      def read(): Future[Option[Buf]] = p
+      def discard(): Unit = p.setException(new ReaderDiscardedException)
+      def onClose: Future[StreamTermination] = Future.never
+    }
+    val pReader = Reader.fromSeq(head +: undefinedReaders)
+    val reader = Reader.flatten(pReader)
+    assertFailed(reader, p)
+    assert(await(pReader.onClose) == StreamTermination.Discarded)
+  }
+
+  test("Reader.flatten - onClose is satisfied when fully read") {
+    val reader = Reader.flatten(Reader.fromSeq(Seq(Reader.value(10), Reader.value(20))))
+    assert(await(reader.read()) == Some(10))
+    assert(await(reader.read()) == Some(20))
+    assert(await(reader.read()) == None)
+    assert(await(reader.onClose) == StreamTermination.FullyRead)
+  }
+
+  test("Reader.flatten - stop when encounter exceptions") {
+    val reader = Reader.flatten(
+      Reader.fromSeq(
+        Seq(Reader.value(10), Reader.exception(new Exception("stop")), Reader.value(20))))
+    assert(await(reader.read()) == Some(10))
+    val ex1 = intercept[Exception] {
+      await(reader.read())
+    }
+    assert(ex1.getMessage == "stop")
+    val ex2 = intercept[Exception] {
+      await(reader.read())
+    }
+    assert(ex2.getMessage == "stop")
+    val ex3 = intercept[Exception] {
+      await(reader.onClose)
+    }
+    assert(ex3.getMessage == "stop")
+  }
+
+  test("Reader.flatten - listen for onClose update from parent") {
+    val exceptionMsg = "boom"
+    val p = new Pipe[Int]
+    val reader = Reader.flatten(Reader.value(p))
+    reader.read()
+    p.fail(new Exception(exceptionMsg))
+    val exception = intercept[Exception] {
+      await(reader.onClose)
+    }
+    assert(exception.getMessage == exceptionMsg)
+  }
+
+  test("Reader.flatten - re-register `curReaderClosep` to listen to the next reader in the stream") {
+    val exceptionMsg = "boom"
+
+    val r1 = Reader.value(1)
+    val p2 = new Promise
+    val i2 = p2.interruptible
+    val r2 = Reader.fromFuture(i2)
+
+    def rStreams: Stream[Reader[Any]] = r1 #:: r2 #:: rStreams
+
+    val reader = Reader.fromSeq(rStreams)
+    val rFlat = reader.flatten
+    val e = new Exception(exceptionMsg)
+
+    assert(await(rFlat.read()) == Some(1))
+    // re-register `curReaderClosep` to listen to r2
+    rFlat.read()
+    i2.raise(e)
+    val exception = intercept[Exception] {
+      await(rFlat.onClose)
+    }
+
+    assert(exception.getMessage == exceptionMsg)
+  }
+
+  test("Reader.fromSeq works on infinite streams") {
+    def ones: Stream[Int] = 1 #:: ones
+    val reader = Reader.fromSeq(ones)
+    assert(await(reader.read()) == Some(1))
+    assert(await(reader.read()) == Some(1))
+    assert(await(reader.read()) == Some(1))
+  }
+
+  test("Reader.fromStream closes resources on EOF read") {
+    val in = spy(new ByteArrayInputStream(arr(0, 10)))
+    val r: Reader[Buf] = Reader.fromStream(in, 4)
+    val f = BufReader.readAll(r)
+    assert(await(f) == buf(0, 10))
+    eventually {
+      verify(in).close()
+    }
+  }
+
+  test("Reader.fromStream closes resources on discard") {
+    val in = spy(new ByteArrayInputStream(arr(0, 10)))
+    val r = Reader.fromStream(in, 4)
+    r.discard()
+    eventually { verify(in).close() }
+  }
+
+  test("Reader.fromAsyncStream completes when stream is empty") {
+    val as = AsyncStream(buf(1, 10)) ++ AsyncStream.exception[Buf](new Exception()) ++ AsyncStream(
+      buf(1, 10))
+    val r = Reader.fromAsyncStream(as)
+    assert(await(r.read()) == Some(buf(1, 10)))
+  }
+
+  test("Reader.fromAsyncStream fails on exceptional stream") {
+    val as = AsyncStream.exception(new Exception())
+    val r = Reader.fromAsyncStream(as)
+    val f = Reader.readAllItems(r)
+    intercept[Exception] {
+      await(f)
+    }
+  }
+
+  test("Reader.fromAsyncStream only evaluates tail when buffer is exhausted") {
+    val tailEvaluated = new AtomicBoolean(false)
+
+    def tail: AsyncStream[Buf] = {
+      tailEvaluated.set(true)
+      AsyncStream.empty
+    }
+
+    val as = AsyncStream.mk(buf(0, 10), AsyncStream.mk(buf(10, 20), tail))
+    val r = Reader.fromAsyncStream(as)
+
+    // partially read the buffer
+    await(r.read())
+    assert(!tailEvaluated.get())
+
+    // read the rest of the buffer
+    await(r.read())
+    assert(tailEvaluated.get())
+  }
+
+  test("Reader.toAsyncStream") {
+    forAll { l: List[Byte] =>
+      val buf = Buf.ByteArray.Owned(l.toArray)
+      val as = Reader.toAsyncStream(Reader.fromBuf(buf, 1))
+
+      assert(await(as.toSeq()).map(b => Buf.ByteArray.Owned.extract(b).head) == l)
+    }
+  }
+
+  test("Reader.flatMap") {
+    forAll { s: String =>
+      val reader1 = Reader.fromBuf(Buf.Utf8(s), 8)
+      val reader2 = reader1.flatMap { buf =>
+        val pipe = new Pipe[Buf]
+        pipe.write(buf).flatMap(_ => pipe.write(Buf.Empty)).flatMap(_ => pipe.close())
+        pipe
+      }
+
+      assert(Buf.decodeString(await(BufReader.readAll(reader2)), JChar.UTF_8) == s)
+    }
+  }
+
+  test("Reader.flatMap: discard the intermediate will discard the output reader") {
+    val reader1 = Reader.fromBuf(Buf.Utf8("hi"), 8)
+    val reader2 = reader1.flatMap { buf =>
+      val pipe = new Pipe[Buf]
+      pipe.write(buf).map(_ => pipe.discard())
+      pipe
+    }
+
+    await(reader2.read())
+    intercept[ReaderDiscardedException] {
+      await(reader2.read())
+    }
+  }
+
+  test("Reader.flatMap: discard the origin reader will discard the output reader") {
+    val reader1 = Reader.fromBuf(Buf.Utf8("hi"), 1)
+    val samples = ArrayBuffer.empty[Reader[Buf]]
+    val reader2 = reader1.flatMap { buf =>
+      val pipe = new Pipe[Buf]
+      pipe.write(buf).map(_ => samples += pipe).flatMap(_ => pipe.close())
+      pipe
+    }
+
+    await(reader2.read())
+    reader1.discard()
+
+    intercept[ReaderDiscardedException] {
+      await(reader2.read())
+    }
+    assert(samples.size == 1)
+    assert(await(samples(0).onClose) == StreamTermination.FullyRead)
+  }
+
+  test(
+    "Reader.flatMap: discard the output reader will discard " +
+      "the origin and intermediate") {
+    val reader1 = Reader.fromBuf(Buf.Utf8("hello"), 1)
+    val samples = ArrayBuffer.empty[Reader[Buf]]
+    val reader2 = reader1.flatMap { buf =>
+      val pipe = new Pipe[Buf]
+      pipe.write(buf).map(_ => samples += pipe).flatMap(_ => pipe.close())
+      pipe
+    }
+
+    await(reader2.read())
+    await(reader2.read())
+    reader2.discard()
+
+    assert(samples.size == 2)
+    assert(await(samples(0).onClose) == StreamTermination.FullyRead)
+    assert(await(samples(1).onClose) == StreamTermination.Discarded)
+
+    intercept[ReaderDiscardedException] {
+      await(reader1.read())
+    }
+  }
+
+  test("Reader.flatMap: propagate parent's onClose when parent reader failed with an exception") {
+    val ExceptionMessage = "boom"
+    val parentReader = new Pipe[Double]
+    val childReader = parentReader.flatMap(Reader.value)
+    parentReader.fail(new Exception(ExceptionMessage))
+    val parentException = intercept[Exception](await(parentReader.onClose))
+    val readerException = intercept[Exception](await(childReader.onClose))
+    assert(parentException.getMessage == ExceptionMessage)
+    assert(readerException.getMessage == ExceptionMessage)
+  }
+
+  test("Reader.flatMap: propagate parent's onClose when parent reader is discarded") {
+    val parentReader = Reader.empty[Int]
+    val childReader = parentReader.flatMap(Reader.value)
+    parentReader.discard()
+    assert(await(parentReader.onClose) == StreamTermination.Discarded)
+    assert(await(childReader.onClose) == StreamTermination.Discarded)
+  }
+
+  test("Reader.value") {
+    forAll { a: AnyVal =>
+      val r = Reader.value(a)
+      assert(await(r.read()) == Some(a))
+      assert(r.onClose.isDefined == false)
+      assert(await(r.read()) == None)
+      assert(await(r.onClose) == StreamTermination.FullyRead)
+    }
+  }
+
+  test("Reader.exception") {
+    forAll { ex: Exception =>
+      val r = Reader.exception(ex)
+      val exr = intercept[Exception] {
+        await(r.read())
+      }
+      assert(exr == ex)
+      val exc = intercept[Exception] {
+        await(r.onClose)
+      }
+      assert(exc == ex)
+    }
+  }
+
+  test("Reader.fromFuture") {
+    // read regularly
+    val r1 = Reader.fromFuture(Future.value(1))
+    assert(await(r1.read()) == Some(1))
+    assert(await(r1.read()) == None)
+
+    // discard
+    val r2 = Reader.fromFuture(Future.value(2))
+    r2.discard()
+    intercept[ReaderDiscardedException] {
+      await(r2.read())
+    }
+  }
+
+  test("Reader.map") {
+    forAll { l: List[Int] =>
+      val pipe = new Pipe[Int]
+      writeLoop(l, pipe)
+      val reader2 = pipe.map(_.toString)
+      assert(await(Reader.readAllItems(reader2)) == l.map(_.toString))
+    }
+  }
+
+  test(
+    "Reader.empty " +
+      "- return Future.None and update closep to be FullyRead after first read") {
+    val reader = Reader.empty
+    assert(await(reader.read()) == None)
+    assert(await(reader.onClose) == StreamTermination.FullyRead)
+  }
+
+  test(
+    "Reader.empty " +
+      "- return ReaderDiscardedException when reading from a discarded reader") {
+    val reader = Reader.empty
+    reader.discard()
+    intercept[ReaderDiscardedException] {
+      await(reader.read())
+    }
+    assert(await(reader.onClose) == StreamTermination.Discarded)
+  }
+
+  test("Reader.readAllItems") {
+    val genBuf: Gen[Buf] = {
+      for {
+        // limit arrays to a few kilobytes, otherwise we may generate a very large amount of data
+        numBytes <- Gen.choose(0.bytes.inBytes, 2.kilobytes.inBytes)
+        bytes <- Gen.containerOfN[Array, Byte](numBytes.toInt, Arbitrary.arbitrary[Byte])
+      } yield {
+        Buf.ByteArray.Owned(bytes)
+      }
+    }
+
+    val genList =
+      Gen.listOf(Gen.oneOf(Gen.alphaLowerStr, Gen.alphaNumStr, Gen.choose(1, 100), genBuf))
+    forAll(genList) { l =>
+      val r = Reader.fromSeq(l)
+      assert(await(Reader.readAllItems(r)) == l)
+    }
   }
 }

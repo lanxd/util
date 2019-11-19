@@ -7,7 +7,7 @@ import java.util.concurrent.atomic.AtomicReference
  * A single-value asynchronous cache with TTL.  The provider supplies the future value when invoked
  * and this class ensures that the provider is not invoked more frequently than the TTL.  If the
  * future fails, that failure is not cached. If more than one value is required, a FutureCache
- * backed by a guava cache with TTL may be more appropriate.
+ * backed by a `Caffeine` cache with TTL may be more appropriate.
  *
  * This is useful in situations where a call to an external service returns a value that changes
  * infrequently and we need to access that value often, for example asking a service for a list of
@@ -17,7 +17,7 @@ import java.util.concurrent.atomic.AtomicReference
  *   def getData(): Future[T] = { ... }
  *
  * can be memoized with a TTL of 1 hour as follows:
- *   import com.twitter.util.TimeConversions._
+ *   import com.twitter.conversions.DurationOps._
  *   import com.twitter.cache.Refresh
  *   val getData: () => Future[T] = Refresh.every(1.hour) { ... }
  */
@@ -47,7 +47,7 @@ object Refresh {
   def every[T](ttl: Duration)(provider: => Future[T]): () => Future[T] = {
     val ref = new AtomicReference[(Future[T], Time)](empty)
     def result(): Future[T] = ref.get match {
-      case tuple@(cachedValue, lastRetrieved) =>
+      case tuple @ (cachedValue, lastRetrieved) =>
         val now = Time.now
         // interruptible allows the promise to be interrupted safely
         if (now < lastRetrieved + ttl) cachedValue.interruptible()
@@ -61,11 +61,10 @@ object Refresh {
             }
             nextResult.proxyTo(p)
             p.interruptible() // interruptible allows the promise to be interrupted safely
-          }
-          else result()
+          } else result()
         }
     }
     // Return result, which is a no-arg function that returns a future
-    result
+    result _
   }
 }

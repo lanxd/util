@@ -11,7 +11,8 @@ import com.twitter.util.{Promise, Return}
  */
 
 object Event {
-  def apply(t: EventType, s: KeeperState, p: Option[String]) = new WatchedEvent(t, s, p.orNull)
+  def apply(t: EventType, s: KeeperState, p: Option[String]): WatchedEvent =
+    new WatchedEvent(t, s, p.orNull)
 
   def unapply(event: WatchedEvent): Option[(EventType, KeeperState, Option[String])] = {
     Some((event.getType, event.getState, Option { event.getPath }))
@@ -19,10 +20,10 @@ object Event {
 }
 
 sealed trait StateEvent {
-  val eventType = EventType.None
+  val eventType: EventType = EventType.None
   val state: KeeperState
-  def apply() = Event(eventType, state, None)
-  def unapply(event: WatchedEvent) = event match {
+  def apply(): WatchedEvent = Event(eventType, state, None)
+  def unapply(event: WatchedEvent): Boolean = event match {
     case Event(t, s, _) => (t == eventType && s == state)
     case _ => false
   }
@@ -30,37 +31,51 @@ sealed trait StateEvent {
 
 object StateEvent {
   object AuthFailed extends StateEvent {
-    val state = KeeperState.AuthFailed
+    val state: KeeperState = KeeperState.AuthFailed
   }
 
   object Connected extends StateEvent {
-    val state = KeeperState.SyncConnected
+    val state: KeeperState = KeeperState.SyncConnected
   }
 
   object Disconnected extends StateEvent {
-    val state = KeeperState.Disconnected
+    val state: KeeperState = KeeperState.Disconnected
   }
 
   object Expired extends StateEvent {
-    val state = KeeperState.Expired
+    val state: KeeperState = KeeperState.Expired
+  }
+
+  object ConnectedReadOnly extends StateEvent {
+    val state: KeeperState = KeeperState.ConnectedReadOnly
+  }
+
+  object SaslAuthenticated extends StateEvent {
+    val state: KeeperState = KeeperState.SaslAuthenticated
   }
 
   def apply(w: WatchedEvent): StateEvent = {
-    w.getState() match {
+    val state = w.getState
+    state match {
       case KeeperState.AuthFailed => AuthFailed
       case KeeperState.SyncConnected => Connected
       case KeeperState.Disconnected => Disconnected
       case KeeperState.Expired => Expired
-      case KeeperState.NoSyncConnected => throw new IllegalArgumentException("Can't convert deprecated state to StateEvent")
+      case KeeperState.ConnectedReadOnly => ConnectedReadOnly
+      case KeeperState.SaslAuthenticated => SaslAuthenticated
+      case _ =>
+        throw new IllegalArgumentException(s"Can't convert deprecated state to StateEvent: $state")
+      //NoSyncConnected and Unknown are depricated in zk 3.x, and should be
+      //expected to be removed in zk 4.x
     }
   }
 }
 
 sealed trait NodeEvent {
-  val state = KeeperState.SyncConnected
+  val state: KeeperState = KeeperState.SyncConnected
   val eventType: EventType
-  def apply(path: String) = Event(eventType, state, Some(path))
-  def unapply(event: WatchedEvent) = event match {
+  def apply(path: String): WatchedEvent = Event(eventType, state, Some(path))
+  def unapply(event: WatchedEvent): Option[String] = event match {
     case Event(t, _, somePath) if (t == eventType) => somePath
     case _ => None
   }
@@ -68,26 +83,26 @@ sealed trait NodeEvent {
 
 object NodeEvent {
   object Created extends NodeEvent {
-    val eventType = EventType.NodeCreated
+    val eventType: EventType = EventType.NodeCreated
   }
 
   object ChildrenChanged extends NodeEvent {
-    val eventType = EventType.NodeChildrenChanged
+    val eventType: EventType = EventType.NodeChildrenChanged
   }
 
   object DataChanged extends NodeEvent {
-    val eventType = EventType.NodeDataChanged
+    val eventType: EventType = EventType.NodeDataChanged
   }
 
   object Deleted extends NodeEvent {
-    val eventType = EventType.NodeDeleted
+    val eventType: EventType = EventType.NodeDeleted
   }
 }
 
 class EventPromise extends Promise[WatchedEvent] with Watcher {
-  def process(event: WatchedEvent) { updateIfEmpty(Return(event)) }
+  def process(event: WatchedEvent): Unit = { updateIfEmpty(Return(event)) }
 }
 
 class EventBroker extends Broker[WatchedEvent] with Watcher {
-  def process(event: WatchedEvent) { send(event).sync() }
+  def process(event: WatchedEvent): Unit = { send(event).sync() }
 }

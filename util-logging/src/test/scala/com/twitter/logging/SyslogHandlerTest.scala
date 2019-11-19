@@ -5,7 +5,7 @@
  * not use this file except in compliance with the License. You may obtain
  * a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *     https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,11 +19,8 @@ package com.twitter.logging
 import java.net.{DatagramPacket, DatagramSocket}
 import java.util.{logging => javalog}
 
-import org.junit.runner.RunWith
 import org.scalatest.WordSpec
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 class SyslogHandlerTest extends WordSpec {
   val record1 = new javalog.LogRecord(Level.FATAL, "fatal message!")
   record1.setLoggerName("net.lag.whiskey.Train")
@@ -51,9 +48,13 @@ class SyslogHandlerTest extends WordSpec {
       SyslogFuture.sync
       val p = new DatagramPacket(new Array[Byte](1024), 1024)
       serverSocket.receive(p)
-      assert(new String(p.getData, 0, p.getLength) === "<9>2008-03-29T05:53:16 raccoon.local whiskey: fatal message!")
+      assert(
+        new String(p.getData, 0, p.getLength) == "<9>2008-03-29T05:53:16 raccoon.local whiskey: fatal message!"
+      )
       serverSocket.receive(p)
-      assert(new String(p.getData, 0, p.getLength) === "<11>2008-03-29T05:53:16 raccoon.local whiskey: error message!")
+      assert(
+        new String(p.getData, 0, p.getLength) == "<11>2008-03-29T05:53:16 raccoon.local whiskey: error message!"
+      )
     }
 
     "with server name" in {
@@ -74,7 +75,9 @@ class SyslogHandlerTest extends WordSpec {
       SyslogFuture.sync
       val p = new DatagramPacket(new Array[Byte](1024), 1024)
       serverSocket.receive(p)
-      assert(new String(p.getData, 0, p.getLength) === "<9>2008-03-29T05:53:16 raccoon.local [pingd] whiskey: fatal message!")
+      assert(
+        new String(p.getData, 0, p.getLength) == "<9>2008-03-29T05:53:16 raccoon.local [pingd] whiskey: fatal message!"
+      )
     }
 
     "with BSD time format" in {
@@ -95,7 +98,9 @@ class SyslogHandlerTest extends WordSpec {
       SyslogFuture.sync
       val p = new DatagramPacket(new Array[Byte](1024), 1024)
       serverSocket.receive(p)
-      assert(new String(p.getData, 0, p.getLength) === "<9>Mar 29 05:53:16 raccoon.local whiskey: fatal message!")
+      assert(
+        new String(p.getData, 0, p.getLength) == "<9>Mar 29 05:53:16 raccoon.local whiskey: fatal message!"
+      )
     }
   }
 }

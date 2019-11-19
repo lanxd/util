@@ -1,19 +1,5 @@
-junit_tests(name='scala',
-  dependencies=[
-    '3rdparty/jvm/junit',
-    '3rdparty/jvm/org/mockito:mockito-all',
-    '3rdparty/jvm/org/scalatest',
-    'util/util-core/src/main/scala',
-    'util/util-jvm/src/main/scala',
-    'util/util-logging/src/main/scala',
-    'util/util-test/src/main/scala',
-  ],
-  sources=rglobs('*.scala')
-)
-
-jvm_binary(name='bin',
-  main='com.twitter.jvm.EstimatorApp',
-  dependencies=[
-    ':scala'
-  ]
+target(
+    dependencies = [
+        "util/util-jvm/src/test/scala/com/twitter/jvm",
+    ],
 )

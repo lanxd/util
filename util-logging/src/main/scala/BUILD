@@ -1,13 +1,5 @@
-scala_library(name='scala',
-  provides = scala_artifact(
-    org = 'com.twitter',
-    name = 'util-logging',
-    repo = artifactory,
-  ),
-  dependencies=[
-    'util/util-app/src/main/scala',
-    'util/util-core/src/main/scala',
-    'util/util-stats/src/main/scala',
-  ],
-  sources=rglobs('*.scala'),
+target(
+    dependencies = [
+        "util/util-logging/src/main/scala/com/twitter/logging",
+    ],
 )

@@ -1,21 +1,25 @@
 package com.twitter.hashing
 
-import org.junit.runner.RunWith
-import org.scalatest.junit.JUnitRunner
 import org.scalatest.FunSuite
-import org.scalatest.prop.GeneratorDrivenPropertyChecks
+import org.scalatestplus.scalacheck.ScalaCheckDrivenPropertyChecks
 
-@RunWith(classOf[JUnitRunner])
-class HashableTest extends FunSuite with GeneratorDrivenPropertyChecks {
+class HashableTest extends FunSuite with ScalaCheckDrivenPropertyChecks {
 
   private[this] val algorithms = Seq(
-    Hashable.CRC32_ITU, Hashable.FNV1_32, Hashable.FNV1_64, Hashable.FNV1A_32,
-    Hashable.FNV1A_64, Hashable.HSIEH, Hashable.JENKINS, Hashable.MD5_LEInt
+    Hashable.CRC32_ITU,
+    Hashable.FNV1_32,
+    Hashable.FNV1_64,
+    Hashable.FNV1A_32,
+    Hashable.FNV1A_64,
+    Hashable.HSIEH,
+    Hashable.JENKINS,
+    Hashable.MD5_LEInt,
+    Hashable.MURMUR3
   )
 
-  def testConsistency[T](algo: Hashable[Array[Byte], T]) {
+  def testConsistency[T](algo: Hashable[Array[Byte], T]): Unit = {
     forAll { input: Array[Byte] =>
-      assert(algo(input) === algo(input))
+      assert(algo(input) == algo(input))
     }
   }
 
@@ -23,5 +27,13 @@ class HashableTest extends FunSuite with GeneratorDrivenPropertyChecks {
     test(s"$algo hashing algorithm should be consistent") {
       testConsistency(algo)
     }
+  }
+
+  test("MD5_LEInt properly hashes") {
+    val h = Hashable.MD5_LEInt
+    assert(h(Array[Byte]()) == -645128748)
+    assert(h(Array[Byte](0)) == -1383745389)
+    assert(h(Array[Byte](1, 2, 3, 4)) == 1522587144)
+    assert(h("lunch money".getBytes("UTF-8")) == -2099949960)
   }
 }

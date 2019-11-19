@@ -1,50 +1,66 @@
 package com.twitter.io
 
+import com.twitter.concurrent.AsyncMutex
+import com.twitter.util._
 import java.io.InputStream
 
-import com.twitter.concurrent.AsyncMutex
-import com.twitter.util.{Closable, CloseAwaitably, Future, FuturePool, Time}
-
 /**
- * Provides the Reader API for an InputStream
+ * Provides the [[Reader]] API for an `InputStream`.
+ *
+ * The given `InputStream` will be closed when [[Reader.read]]
+ * reaches the EOF or a call to [[discard()]] or [[close()]].
  */
-class InputStreamReader private[io] (inputStream: InputStream, maxBufferSize: Int, pool: FuturePool)
-    extends Reader with Closable with CloseAwaitably {
+class InputStreamReader private[io] (inputStream: InputStream, chunkSize: Int, pool: FuturePool)
+    extends Reader[Buf]
+    with Closable
+    with CloseAwaitably {
   private[this] val mutex = new AsyncMutex()
   @volatile private[this] var discarded = false
+  private[this] val closep = Promise[StreamTermination]()
 
-  def this(inputStream: InputStream, maxBufferSize: Int) =
-    this(inputStream, maxBufferSize, FuturePool.interruptibleUnboundedPool)
+  /**
+   * Constructs an [[InputStreamReader]] out of a given `inputStream`. The resulting [[Reader]]
+   * emits chunks of at most `chunkSize`.
+   */
+  def this(inputStream: InputStream, chunkSize: Int) =
+    this(inputStream, chunkSize, FuturePool.interruptibleUnboundedPool)
 
   /**
    * Asynchronously read at most min(`n`, `maxBufferSize`) bytes from
-   * the InputStream. The returned future represents the results of
+   * the `InputStream`. The returned [[Future]] represents the results of
    * the read operation.  Any failure indicates an error; an empty buffer
    * indicates that the stream has completed.
+   *
+   * @note the underlying `InputStream` is closed on read of EOF.
    */
-  def read(n: Int): Future[Option[Buf]] = {
+  def read(): Future[Option[Buf]] = {
     if (discarded)
-      return Future.exception(new Reader.ReaderDiscarded())
-    if (n == 0)
-      return Future.value(Some(Buf.Empty))
+      return Future.exception(new ReaderDiscardedException())
 
-    mutex.acquire() flatMap { permit =>
+    mutex.acquire().flatMap { permit =>
       pool {
         try {
           if (discarded)
-            throw new Reader.ReaderDiscarded()
-          val size = n min maxBufferSize
-          val buffer = new Array[Byte](size)
-          val c = inputStream.read(buffer, 0, size)
-          if (c == -1)
+            throw new ReaderDiscardedException()
+          val buffer = new Array[Byte](chunkSize)
+          val c = inputStream.read(buffer, 0, chunkSize)
+          if (c == -1) {
+            pool { inputStream.close() }
+            closep.updateIfEmpty(StreamTermination.FullyRead.Return)
             None
-          else
+          } else {
             Some(Buf.ByteArray.Owned(buffer, 0, c))
-        } catch { case exc: InterruptedException =>
-            discarded = true
+          }
+        } catch {
+          case exc: InterruptedException =>
+            // we use updateIfEmpty because this is potentially racy, if someone
+            // called close and then we were interrupted.
+            if (closep.updateIfEmpty(Throw(exc))) {
+              discard()
+            }
             throw exc
         }
-      } ensure {
+      }.ensure {
         permit.release()
       }
     }
@@ -52,20 +68,33 @@ class InputStreamReader private[io] (inputStream: InputStream, maxBufferSize: In
 
   /**
    * Discard this reader: its output is no longer required.
+   *
+   * This asynchronously closes the underlying `InputStream`.
    */
-  def discard() { discarded = true }
+  def discard(): Unit = close()
 
   /**
-   * Discards this Reader and closes the underlying InputStream
+   * Discards this [[Reader]] and closes the underlying `InputStream`
    */
-  def close(deadline: Time) = closeAwaitably {
-    discard()
-    pool { inputStream.close() }
+  def close(deadline: Time): Future[Unit] = closeAwaitably {
+    discarded = true
+    pool { inputStream.close() }.ensure {
+      closep.updateIfEmpty(StreamTermination.Discarded.Return)
+    }
   }
+
+  def onClose: Future[StreamTermination] = closep
 }
 
 object InputStreamReader {
-  val DefaultMaxBufferSize = 4096
-  def apply(inputStream: InputStream, maxBufferSize: Int = DefaultMaxBufferSize) =
-    new InputStreamReader(inputStream, maxBufferSize)
+  val DefaultMaxBufferSize: Int = 4096
+
+  /**
+   * Create an [[InputStreamReader]] from the given `InputStream`
+   * using [[FuturePool.interruptibleUnboundedPool]] for executing
+   * all I/O.
+   */
+  def apply(inputStream: InputStream, chunkSize: Int = DefaultMaxBufferSize): InputStreamReader =
+    new InputStreamReader(inputStream, chunkSize)
+
 }

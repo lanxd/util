@@ -1,22 +1,19 @@
 package com.twitter.zk
 
+import com.twitter.io.TempDirectory
 import java.io.File
 import java.net.InetAddress
-import com.twitter.common.io.FileUtils
 import org.apache.zookeeper.server.ZooKeeperServer
-import org.junit.runner.RunWith
 import org.scalatest.{BeforeAndAfter, FunSuite}
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
-class ServerCnxnFactoryTest extends FunSuite with BeforeAndAfter  {
+class ServerCnxnFactoryTest extends FunSuite with BeforeAndAfter {
   val addr = InetAddress.getLocalHost
 
   var testServer: ZooKeeperServer = null
   var tmpDir: File = null
 
   before {
-    tmpDir = FileUtils.createTempDir()
+    tmpDir = TempDirectory.create()
     testServer = new ZooKeeperServer(tmpDir, tmpDir, ZooKeeperServer.DEFAULT_TICK_TIME)
   }
 
@@ -29,9 +26,9 @@ class ServerCnxnFactoryTest extends FunSuite with BeforeAndAfter  {
     val boundPort = factory.getLocalPort
 
     factory.startup(testServer)
-    assert(testServer.getClientPort === boundPort)
+    assert(testServer.getClientPort == boundPort)
 
     factory.shutdown()
-    assert(testServer.isRunning === false)
+    assert(testServer.isRunning == false)
   }
 }

@@ -1,28 +1,23 @@
 package com.twitter.jvm
 
+import com.twitter.util.{Await, Promise}
 import java.util.concurrent.locks.ReentrantLock
-
-import org.junit.runner.RunWith
 import org.scalatest.FunSuite
 import org.scalatest.concurrent.Eventually
-import org.scalatest.junit.JUnitRunner
 import org.scalatest.time.{Millis, Seconds, Span}
-
-import com.twitter.util.{Await, Promise}
 
 class Philosopher {
   val ready = new Promise[Unit]
   private val lock = new ReentrantLock()
   def dine(neighbor: Philosopher): Unit = {
     lock.lockInterruptibly()
-    ready.setValue(Unit)
+    ready.setValue(())
     Await.ready(neighbor.ready)
     neighbor.dine(this)
     lock.unlock()
   }
 }
 
-@RunWith(classOf[JUnitRunner])
 class ContentionTest extends FunSuite with Eventually {
 
   implicit override val patienceConfig =
@@ -35,17 +30,17 @@ class ContentionTest extends FunSuite with Eventually {
     val plato = new Philosopher()
 
     val d = new Thread(new Runnable() {
-      def run() { descartes.dine(plato) }
+      def run(): Unit = { descartes.dine(plato) }
     })
     d.start()
 
     val p = new Thread(new Runnable() {
-      def run() { plato.dine(descartes) }
+      def run(): Unit = { plato.dine(descartes) }
     })
     p.start()
     Await.all(descartes.ready, plato.ready)
 
-    eventually { assert(c.snap().deadlocks.size === 2) }
+    eventually { assert(c.snap().deadlocks.size == 2) }
     d.interrupt()
     p.interrupt()
     p.join()

@@ -1,13 +1,10 @@
 package com.twitter.util
 
-import org.junit.runner.RunWith
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 class TryTest extends FunSuite {
   class MyException extends Exception
-  val e = new Exception("this is an exception")
+  val e: Exception = new Exception("this is an exception")
 
   test("Try.apply(): should catch exceptions and lift into the Try type") {
     assert(Try[Int](1) == Return(1))
@@ -20,8 +17,29 @@ class TryTest extends FunSuite {
     }
   }
 
+  test("Try.withFatals works like Try.apply, but can handle fatals") {
+    val nonFatal = new Exception
+    val fatal = new AbstractMethodError
+    val handler: PartialFunction[Throwable, Try[Int]] = {
+      case e: AbstractMethodError => Throw(e)
+      case e: Exception => Return(1)
+    }
+
+    // Works like Try.apply for non fatal errors.
+    assert(Try.withFatals(1)(handler) == Return(1))
+    assert(Try.withFatals(throw nonFatal)(handler) == Throw(nonFatal))
+
+    // Handles fatal errors
+    assert(Try.withFatals(throw fatal)(handler) == Throw(fatal))
+
+    // Unhandled fatals are propagated
+    intercept[NoClassDefFoundError] {
+      Try.withFatals(throw new NoClassDefFoundError)(handler)
+    }
+  }
+
   test("Try.throwable: should return e for Throw:s") {
-    assert(Throw(e).throwable === e)
+    assert(Throw(e).throwable == e)
   }
 
   test("Try.throwable: should throw IllegalStateException for Return:s") {
@@ -59,17 +77,17 @@ class TryTest extends FunSuite {
   }
 
   test("Try.map: when there is an exception") {
-    val result1 = Return(1) map(_ => throw e)
+    val result1 = Return(1) map (_ => throw e)
     assert(result1 == Throw(e))
 
     val e2 = new Exception
-    val result2 = Throw[Int](e) map(_ => throw e2)
+    val result2 = Throw[Int](e) map (_ => throw e2)
     assert(result2 == Throw(e))
   }
 
   test("Try.flatMap: when there is no exception") {
-    val result1 = Return(1) flatMap(x => Return(1 + x))
-    val result2 = Throw[Int](e) flatMap(x => Return(1 + x))
+    val result1 = Return(1) flatMap (x => Return(1 + x))
+    val result2 = Throw[Int](e) flatMap (x => Return(1 + x))
 
     assert(result1 == Return(2))
     assert(result2 == Throw(e))
@@ -156,5 +174,49 @@ class TryTest extends FunSuite {
 
   test("Try.collect: with Returns") {
     assert(Try.collect(Seq(Return(1), Return(2))) == Return(Seq(1, 2)))
+  }
+
+  test("Try.orThrow: returns on Some") {
+    val exc = new Exception("boom!")
+    assert(Try.orThrow(Some("OK")) { () =>
+      exc
+    } == Return("OK"))
+  }
+
+  test("Try.orThrow: fails on empty on Some") {
+    val exc = new Exception("boom!")
+    assert(Try.orThrow(None) { () =>
+      exc
+    } == Throw(exc))
+  }
+
+  test("Try.orThrow: OK if you throw") {
+    val exc = new Exception("boom!")
+    assert(Try.orThrow(None) { () =>
+      throw exc
+    } == Throw(exc))
+  }
+
+  test("OrThrow implicits in nicely") {
+    import Try._
+    val exc = new Exception("boom!")
+    assert(Some("OK").orThrow { exc } == Return("OK"))
+  }
+
+  test("Try from scala.util.Try works") {
+    import scala.util.{Try => STry}
+
+    assert(Try.fromScala(STry(1)) == Try(1))
+    assert(Try.fromScala(STry(sys.error("boom!"))).isThrow)
+  }
+
+  test("Try to scala.util.Try works") {
+    import scala.util.{Try => STry, Failure, Success}
+
+    assert(STry(1) == Try(1).asScala)
+    assert(Try(sys.error("boom!")).asScala match {
+      case Failure(_) => true
+      case Success(_) => false
+    })
   }
 }

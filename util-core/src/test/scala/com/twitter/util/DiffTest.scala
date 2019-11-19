@@ -1,34 +1,31 @@
 package com.twitter.util
 
-import org.junit.runner.RunWith
 import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 import org.scalacheck.Arbitrary.arbitrary
-import org.scalatest.prop.GeneratorDrivenPropertyChecks
+import org.scalatestplus.scalacheck.ScalaCheckDrivenPropertyChecks
 
-@RunWith(classOf[JUnitRunner])
-class DiffTest extends FunSuite with GeneratorDrivenPropertyChecks {
+class DiffTest extends FunSuite with ScalaCheckDrivenPropertyChecks {
   val f: Int => String = _.toString
 
   test("Diffable.ofSet") {
     forAll(arbitrary[Set[Int]], arbitrary[Set[Int]]) { (a, b) =>
-      Diffable.diff(a, b).patch(a) === b
+      assert(Diffable.diff(a, b).patch(a) == b)
     }
 
     forAll(arbitrary[Set[Int]], arbitrary[Set[Int]]) { (a, b) =>
       val diff = Diffable.diff(a, b)
-      diff.map(f).patch(a.map(f)) === b.map(f)
+      assert(diff.map(f).patch(a.map(f)) == b.map(f))
     }
   }
 
   test("Diffable.ofSeq") {
     forAll(arbitrary[Seq[Int]], arbitrary[Seq[Int]]) { (a, b) =>
-      Diffable.diff(a, b).patch(a) === b
+      assert(Diffable.diff(a, b).patch(a) == b)
     }
 
     forAll(arbitrary[Seq[Int]], arbitrary[Seq[Int]]) { (a, b) =>
       val diff = Diffable.diff(a, b)
-      diff.map(f).patch(a.map(f)) === b.map(f)
+      assert(diff.map(f).patch(a.map(f)) == b.map(f))
     }
   }
 }

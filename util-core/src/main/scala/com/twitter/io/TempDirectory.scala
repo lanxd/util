@@ -1,25 +1,40 @@
 package com.twitter.io
 
 import java.io.File
+import java.util.concurrent.ConcurrentLinkedQueue
+import scala.util.control.NonFatal
 
 object TempDirectory {
+
   /**
-   * Create a new temporary directory, which will be deleted upon the exit of the VM.
+   * A thread-safe queue of temp directories to be cleaned up on JVM Shutdown
+   */
+  private[this] val dirs = new ConcurrentLinkedQueue[File]()
+
+  Runtime.getRuntime.addShutdownHook(new Thread {
+    override def run(): Unit = {
+      while (!dirs.isEmpty) {
+        try {
+          Files.delete(dirs.poll())
+        } catch {
+          case NonFatal(t) => t.printStackTrace()
+        }
+      }
+    }
+  })
+
+  /**
+   * Create a new temporary directory which is optionally registered to be deleted upon the exit
+   * of the VM.
    *
-   * @return File representing the directory
+   * @param deleteAtExit Whether to register a JVM shutdown hook to delete the directory.
+   * @return File representing the directory.
    */
   def create(deleteAtExit: Boolean = true): File = {
-    var file = File.createTempFile("temp", "dir")
-    file.delete()
-    file.mkdir()
+    val path = java.nio.file.Files.createTempDirectory("TempDirectory")
 
-    if (deleteAtExit)
-      Runtime.getRuntime().addShutdownHook(new Thread {
-        override def run() {
-          Files.delete(file)
-        }
-      })
+    if (deleteAtExit) dirs.add(path.toFile)
 
-    file
+    path.toFile
   }
 }

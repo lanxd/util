@@ -1,14 +1,13 @@
-maven_layout()
-
-jar_library(name='util-cache',
-  dependencies=[
-    'util/util-cache/src/main/scala'
-  ]
+target(
+    dependencies = [
+        "util/util-cache/src/main/scala",
+    ],
 )
 
-jar_library(name='tests',
-  dependencies=[
-    'util/util-cache/src/test/java',
-    'util/util-cache/src/test/scala'
-  ]
+target(
+    name = "tests",
+    dependencies = [
+        "util/util-cache/src/test/java",
+        "util/util-cache/src/test/scala",
+    ],
 )

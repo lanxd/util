@@ -1,8 +1,6 @@
-java_library(name='java',
-  provides = artifact(
-    org = 'com.twitter',
-    name = 'util-app-java',
-    repo = artifactory,
-  ),
-  sources=rglobs('*.java')
+target(
+    dependencies = [
+        "util/util-app/src/main/java/com/twitter/app",
+        "util/util-app/src/main/scala",
+    ],
 )

@@ -1,11 +1,5 @@
-scala_library(name='scala',
-  provides = scala_artifact(
-    org = 'com.twitter',
-    name = 'util-registry',
-    repo = artifactory,
-  ),
-  dependencies=[
-    'util/util-core/src/main/scala',
-  ],
-  sources=rglobs('*.scala')
+target(
+    dependencies = [
+        "util/util-registry/src/main/scala/com/twitter/util/registry",
+    ],
 )

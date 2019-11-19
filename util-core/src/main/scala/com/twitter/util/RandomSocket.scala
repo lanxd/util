@@ -2,6 +2,7 @@ package com.twitter.util
 
 import java.io.IOException
 import java.net.{InetSocketAddress, Socket}
+import scala.util.control.NonFatal
 
 /**
  * A generator of random local [[java.net.InetSocketAddress]] objects with
@@ -13,7 +14,7 @@ object RandomSocket {
   private[this] val ephemeralSocketAddress = localSocketOnPort(0)
 
   @deprecated("RandomSocket cannot ensure that the address is not in use.", "2014-11-13")
-  def apply() = nextAddress()
+  def apply(): InetSocketAddress = nextAddress()
 
   @deprecated("RandomSocket cannot ensure that the address is not in use.", "2014-11-13")
   def nextAddress(): InetSocketAddress =

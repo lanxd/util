@@ -2,24 +2,58 @@ package com.twitter.util
 
 import java.util.concurrent.atomic.{AtomicLong, AtomicReference, AtomicReferenceArray}
 import java.util.{List => JList}
-
 import scala.annotation.tailrec
+import scala.collection.compat._
 import scala.collection.JavaConverters._
-import scala.collection.generic.CanBuildFrom
 import scala.collection.immutable
 import scala.collection.mutable.Buffer
+import scala.language.higherKinds
+import scala.reflect.ClassTag
+import scala.Iterable
 
 /**
- * Trait Var represents a variable. It is a reference cell which is
- * composable: dependent Vars (derived through flatMap) are
- * recomputed automatically when independent variables change -- they
- * implement a form of self-adjusting computation.
+ * Vars are values that vary over time. To create one, you must give it an
+ * initial value.
  *
- * Vars are observed, notifying users whenever the variable changes.
+ * {{{
+ * val a = Var[Int](1)
+ * }}}
+ *
+ * A Var created this way can be sampled to retrieve its current value,
+ *
+ * {{{
+ * println(Var.sample(a)) // prints 1
+ * }}}
+ *
+ * or, invoked to assign it new values.
+ *
+ * {{{
+ * a.update(2)
+ * println(Var.sample(a)) // prints 2
+ * }}}
+ *
+ * Vars can be derived from other Vars.
+ *
+ * {{{
+ * val b = a.flatMap { x => Var(x + 2) }
+ * println(Var.sample(b)) // prints 4
+ * }}}
+ *
+ * And, if the underlying is assigned a new value, the derived Var is updated.
+ * Updates are computed lazily, so while assignment is cheap, sampling is where
+ * we pay the cost of the computation required to derive the new Var.
+ *
+ * {{{
+ * a.update(1)
+ * println(Var.sample(b)) // prints 3
+ * }}}
+ *
+ * A key difference between the derived Var and its underlying is that derived
+ * Vars can't be assigned new values. That's why `b`, from the example above,
+ * can't be invoked to assign it a new value, it can only be sampled.
  *
  * @note Vars do not always perform the minimum amount of
  * re-computation.
- *
  * @note There are no well-defined error semantics for Var. Vars are
  * computed lazily, and the updating thread will receive any
  * exceptions thrown while computing derived Vars.
@@ -33,8 +67,7 @@ trait Var[+T] { self =>
    * Observe this Var. `f` is invoked each time the variable changes,
    * and synchronously with the first call to this method.
    */
-  @deprecated("Use changes (Event)", "6.8.2")
-  final def observe(f: T => Unit): Closable = observe(0, Observer(f))
+  private[util] final def observe(f: T => Unit): Closable = observe(0, Observer(f))
 
   /**
    * Concrete implementations of Var implement observe. This is
@@ -47,10 +80,6 @@ trait Var[+T] { self =>
    * before recomputing a derived variable.
    */
   protected def observe(depth: Int, obs: Observer[T]): Closable
-
-  /** Synonymous with observe */
-  @deprecated("Use changes (Event)", "6.8.2")
-  def foreach(f: T => Unit) = observe(f)
 
   /**
    * Create a derived variable by applying `f` to the contained
@@ -68,7 +97,9 @@ trait Var[+T] { self =>
   def flatMap[U](f: T => Var[U]): Var[U] = new Var[U] {
     def observe(depth: Int, obs: Observer[U]) = {
       val inner = new AtomicReference(Closable.nop)
-      val outer = self.observe(depth, Observer(t => {
+      val outer = self.observe(
+        depth,
+        Observer(t => {
           // TODO: Right now we rely on synchronous propagation; and
           // thus also synchronous closes. We should instead perform
           // asynchronous propagation so that it is is safe &
@@ -80,10 +111,10 @@ trait Var[+T] { self =>
           // we control all Var implementations, and also all Closable
           // combinators have been modified to evaluate their respective
           // Futures eagerly.
-          val done = inner.getAndSet(f(t).observe(depth+1, obs)).close()
+          val done = inner.getAndSet(f(t).observe(depth + 1, obs)).close()
           assert(done.isDone)
-        }
-      ))
+        })
+      )
 
       Closable.sequence(outer, Closable.ref(inner))
     }
@@ -91,14 +122,6 @@ trait Var[+T] { self =>
 
   def join[U](other: Var[U]): Var[(T, U)] =
     for { t <- self; u <- other } yield (t, u)
-
-  /**
-   * Observe this Var into the given AtomicReference.
-   * Observation stops when the returned closable is closed.
-   */
-  @deprecated("Use changes (Event)", "6.8.2")
-  def observeTo[U >: T](ref: AtomicReference[U]): Closable =
-    this observe { newv => ref.set(newv) }
 
   /**
    * An Event where changes in Var are emitted. The current value
@@ -109,41 +132,17 @@ trait Var[+T] { self =>
    */
   lazy val changes: Event[T] = new Event[T] {
     def register(s: Witness[T]) =
-      self observe { newv => s.notify(newv) }
+      self.observe { newv =>
+        s.notify(newv)
+      }
   }
-  
+
   /**
    * Produce an [[Event]] reflecting the differences between
    * each update to this [[Var]].
-   */ 
-  def diff[CC[_]: Diffable, U](implicit toCC: T <:< CC[U]): Event[Diff[CC, U]] = 
-    changes.diff
-
-  /**
-   * A one-shot predicate observation. The returned future
-   * is satisfied with the first observed value of Var that obtains
-   * the predicate `pred`. Observation stops when the future is
-   * satisfied.
-   *
-   * Interrupting the future will also satisfy the future (with the
-   * interrupt exception) and close the observation.
    */
-  @deprecated("Use changes (Event)", "6.8.2")
-  def observeUntil(pred: T => Boolean): Future[T] = {
-    val p = Promise[T]()
-    p.setInterruptHandler {
-      case exc => p.updateIfEmpty(Throw(exc))
-    }
-
-    val o = observe {
-      case el if pred(el) => p.updateIfEmpty(Return(el))
-      case _ =>
-    }
-
-    p ensure {
-      o.close()
-    }
-  }
+  def diff[CC[_]: Diffable, U](implicit toCC: T <:< CC[U]): Event[Diff[CC, U]] =
+    changes.diff
 
   def sample(): T = Var.sample(this)
 }
@@ -157,6 +156,7 @@ abstract class AbstractVar[T] extends Var[T]
  * Note: There is a Java-friendly API for this object: [[com.twitter.util.Vars]].
  */
 object Var {
+
   /**
    * A Var observer. Observers are owned by exactly one producer,
    * enforced by a leasing mechanism.
@@ -193,7 +193,7 @@ object Var {
   }
 
   private[util] object Observer {
-    def apply[T](k: T => Unit) = new Observer(k)
+    def apply[T](k: T => Unit): Observer[T] = new Observer(k)
   }
 
   /**
@@ -222,83 +222,162 @@ object Var {
     new UpdatableVar(init)
 
   /**
-   * Constructs a Var from an initial value plus an event stream of
+   * Constructs a [[Var]] from an initial value plus an event stream of
    * changes. Note that this eagerly subscribes to the event stream;
-   * it is unsubscribed whenever the returned Var is collected.
+   * it is unsubscribed whenever the returned [[Var]] is collected.
    */
   def apply[T](init: T, e: Event[T]): Var[T] = {
     val v = Var(init)
-    Closable.closeOnCollect(e.register(Witness(v)), v)
+
+    // In order to support unsubscribing from e when v is no longer referenced
+    // we must avoid e keeping a strong reference to v.
+    val witness = Witness.weakReference(v)
+    Closable.closeOnCollect(e.register(witness), v)
+
     v
   }
 
   /**
    * Patch reconstructs a [[Var]] based on observing the incremental
-   * changes presented in the underlying [[Diff]]s.
-   * 
+   * changes presented in the underlying [[Diff Diffs]].
+   *
    * Note that this eagerly subscribes to the event stream;
-   * it is unsubscribed whenever the returned Var is collected.
+   * it is unsubscribed whenever the returned [[Var]] is collected.
    */
   def patch[CC[_]: Diffable, T](diffs: Event[Diff[CC, T]]): Var[CC[T]] = {
-    val v = Var(Diffable.empty: CC[T])
-    Closable.closeOnCollect(diffs respond { diff =>
+    val v = Var(Diffable.empty[CC, T]: CC[T])
+
+    // In order to support unsubscribing from diffs when v is no longer referenced
+    // we must avoid diffs keeping a strong reference to v.
+    val witness = Witness.weakReference { diff: Diff[CC, T] =>
       synchronized {
-        v() = diff.patch(v())
+        v.update(diff.patch(v()))
       }
-    }, v)
+    }
+    val closable = diffs.register(witness)
+    Closable.closeOnCollect(closable, v)
+
     v
   }
 
-  private case class Value[T](v: T) extends Var[T] {
+  private case class Value[T](v: T) extends Var[T] with Extractable[T] {
     protected def observe(depth: Int, obs: Observer[T]): Closable = {
       obs.claim(this)
       obs.publish(this, v, 0)
       Closable.nop
     }
+
+    def apply(): T = v
   }
 
   /**
    * Create a new, constant, v-valued Var.
    */
-  def value[T](v: T): Var[T] = Value(v)
+  def value[T](v: T): Var[T] with Extractable[T] = Value(v)
 
   /**
    * Collect a collection of Vars into a Var of collection.
+   * Var.collect can result in a stack overflow if called with a large sequence.
+   * Var.collectIndependent breaks composition with respect to update propagation.
+   * That is, collectIndependent can fail to correctly update interdependent vars,
+   * but is safe for independent vars.
+   *
+   * {{{
+   *  // Example of difference between collect and collectIndependent:
+   *  val v1 = Var(1)
+   *  val v2 = v1.map(_*2)
+   *  val vCollect = Var.collect(Seq(v1, v2)).map { case Seq(a, b) => (a, b) }
+   *  val vCollectIndependent = Var.collectIndependent(Seq(v1, v2)).map { case Seq(a, b) => (a, b) }
+   *  val refCollect = new AtomicReference[Seq[(Int, Int)]]
+   *  vCollect.changes.build.register(Witness(refCollect))
+   *  val refCollectIndependent = new AtomicReference[Seq[(Int, Int)]]
+   *  vCollectIndependent.changes.build.register(Witness(refCollectIndependent))
+   *  v1() = 2
+   *  // refCollect == Vector((1,2), (2,4))
+   *  // refCollectIndependent == Vector((1,2), (2,2), (2,4))
+   * }}}
    */
-  def collect[T, CC[X] <: Traversable[X]](vars: CC[Var[T]])
-      (implicit newBuilder: CanBuildFrom[CC[T], T, CC[T]], cm: ClassManifest[T])
-      : Var[CC[T]] = async(newBuilder().result) { v =>
-    val N = vars.size
-    val cur = new AtomicReferenceArray[T](N)
-    @volatile var filling = true
-    def build() = {
-      val b = newBuilder()
-      var i = 0
-      while (i < N) {
-        b += cur.get(i)
-        i += 1
+  def collect[T: ClassTag, CC[X] <: Iterable[X]](
+    vars: CC[Var[T]]
+  )(
+    implicit factory: Factory[T, CC[T]]
+  ): Var[CC[T]] = {
+    val vs = vars.toArray
+
+    def tree(begin: Int, end: Int): Var[Seq[T]] =
+      if (begin == end) Var(Seq.empty)
+      else if (begin == end - 1) vs(begin).map(t => Seq(t))
+      else {
+        val n = (end - begin) / 2
+
+        for {
+          left <- tree(begin, begin + n)
+          right <- tree(begin + n, end)
+        } yield left ++ right
       }
+
+    tree(0, vs.length).map { ts =>
+      val b = factory.newBuilder
+      b ++= ts
       b.result()
     }
-
-    def publish(i: Int, newi: T) = {
-      cur.set(i, newi)
-      if (!filling) v() = build()
-    }
-
-    val closes = new Array[Closable](N)
-    var i = 0
-    for (u <- vars) {
-      val j = i
-      closes(j) = u observe (0, Observer(newj => publish(j, newj)))
-      i += 1
-    }
-
-    filling = false
-    v() = build()
-
-    Closable.all(closes:_*)
   }
+
+  /**
+   * Collect a collection of Vars into a Var of collection.
+   * Var.collect can result in a stack overflow if called with a large sequence.
+   * Var.collectIndependent breaks composition with respect to update propagation.
+   * That is, collectIndependent can fail to correctly update interdependent vars,
+   * but is safe for independent vars.
+   *
+   * {{{
+   *  // Example of difference between collect and collectIndependent:
+   *  val v1 = Var(1)
+   *  val v2 = v1.map(_*2)
+   *  val vCollect = Var.collect(Seq(v1, v2)).map { case Seq(a, b) => (a, b) }
+   *  val vCollectIndependent = Var.collectIndependent(Seq(v1, v2)).map { case Seq(a, b) => (a, b) }
+   *  val refCollect = new AtomicReference[Seq[(Int, Int)]]
+   *  vCollect.changes.build.register(Witness(refCollect))
+   *  val refCollectIndependent = new AtomicReference[Seq[(Int, Int)]]
+   *  vCollectIndependent.changes.build.register(Witness(refCollectIndependent))
+   *  v1() = 2
+   *  // refCollect == Vector((1,2), (2,4))
+   *  // refCollectIndependent == Vector((1,2), (2,2), (2,4))
+   * }}}
+   */
+  def collectIndependent[T: ClassTag, CC[X] <: Iterable[X]](
+    vars: CC[Var[T]]
+  )(
+    implicit factory: Factory[T, CC[T]]
+  ): Var[CC[T]] =
+    async(factory.newBuilder.result()) { v =>
+      val N = vars.size
+      val cur = new AtomicReferenceArray[T](N)
+      @volatile var filling = true
+      def build() = {
+        val b = factory.newBuilder
+        var i = 0
+        while (i < N) {
+          b += cur.get(i)
+          i += 1
+        }
+        b.result()
+      }
+
+      def publish(i: Int, newValue: T) = {
+        cur.set(i, newValue)
+        if (!filling) v() = build()
+      }
+
+      val closes = vars.iterator.zipWithIndex.map {
+        case (v, i) => v.observe(0, Observer(newValue => publish(i, newValue)))
+      }.toSeq
+
+      filling = false
+      v() = build()
+
+      Closable.all(closes: _*)
+    }
 
   /**
    * Collect a List of Vars into a new Var of List.
@@ -307,7 +386,7 @@ object Var {
    * @return a Var[java.util.List[A]] containing the collected values from vars.
    */
   def collect[T <: Object](vars: JList[Var[T]]): Var[JList[T]] = {
-    // we cast to Object and back because we need a ClassManifest[T]
+    // we cast to Object and back because we need a ClassTag[T]
     val list = vars.asScala.asInstanceOf[Buffer[Var[Object]]]
     collect(list).map(_.asJava).asInstanceOf[Var[JList[T]]]
   }
@@ -337,12 +416,12 @@ object Var {
    * Updates from `update` are ignored after the returned
    * [[com.twitter.util.Closable]] is closed.
    */
-  def async[T](empty: T)(update: Updatable[T] => Closable): Var[T] = new Var[T] {
+  def async[T](empty: T)(update: Updatable[T] => Closable): Var[T] = new Var[T] { self =>
     import create._
     private var state: State[T] = Idle
 
     private val closable = Closable.make { deadline =>
-      synchronized {
+      self.synchronized {
         state match {
           case Idle =>
             Future.Done
@@ -354,14 +433,14 @@ object Var {
             c.close(deadline)
             Future.Done
           case Observing(n, v, c) =>
-            state = Observing(n-1, v, c)
+            state = Observing(n - 1, v, c)
             Future.Done
         }
       }
     }
 
     protected def observe(depth: Int, obs: Observer[T]): Closable = {
-      val v = synchronized {
+      val v = self.synchronized {
         state match {
           case Idle =>
             val v = Var(empty)
@@ -369,7 +448,7 @@ object Var {
             state = Observing(1, v, c)
             v
           case Observing(n, v, c) =>
-            state = Observing(n+1, v, c)
+            state = Observing(n + 1, v, c)
             v
         }
       }
@@ -384,16 +463,16 @@ private object UpdatableVar {
   import Var.Observer
 
   case class Party[T](obs: Observer[T], depth: Int, n: Long) {
-    @volatile var active = true
+    @volatile var active: Boolean = true
   }
 
   case class State[T](value: T, version: Long, parties: immutable.SortedSet[Party[T]]) {
-    def -(p: Party[T]) = copy(parties=parties-p)
-    def +(p: Party[T]) = copy(parties=parties+p)
-    def :=(newv: T) = copy(value=newv, version=version+1)
+    def -(p: Party[T]): State[T] = copy(parties = parties - p)
+    def +(p: Party[T]): State[T] = copy(parties = parties + p)
+    def :=(newv: T): State[T] = copy(value = newv, version = version + 1)
   }
 
-  implicit def order[T] = new Ordering[Party[T]] {
+  implicit def order[T]: Ordering[Party[T]] = new Ordering[Party[T]] {
     // This is safe because observers are compared
     // only from the same counter.
     def compare(a: Party[T], b: Party[T]): Int = {
@@ -404,16 +483,12 @@ private object UpdatableVar {
   }
 }
 
-private[util] class UpdatableVar[T](init: T)
-    extends Var[T]
-    with Updatable[T]
-    with Extractable[T] {
+private[util] class UpdatableVar[T](init: T) extends Var[T] with Updatable[T] with Extractable[T] {
   import UpdatableVar._
   import Var.Observer
 
   private[this] val n = new AtomicLong(0)
-  private[this] val state = new AtomicReference(
-    State[T](init, 0, immutable.SortedSet.empty))
+  private[this] val state = new AtomicReference(State[T](init, 0, immutable.SortedSet.empty))
 
   @tailrec
   private[this] def cas(next: State[T] => State[T]): State[T] = {
@@ -426,7 +501,7 @@ private[util] class UpdatableVar[T](init: T)
 
   def update(newv: T): Unit = synchronized {
     val State(value, version, parties) = cas(_ := newv)
-    for (p@Party(obs, _, _) <- parties) {
+    for (p @ Party(obs, _, _) <- parties) {
       // An antecedent update may have closed the current
       // party (e.g. flatMap does this); we need to check that
       // the party is active here in order to prevent stale updates.
@@ -450,11 +525,10 @@ private[util] class UpdatableVar[T](init: T)
     }
   }
 
-  override def toString = "Var("+state.get.value+")@"+hashCode
+  override def toString: String = "Var(" + state.get.value + ")@" + hashCode
 }
 
 /**
  * Java adaptation of `Var[T] with Updatable[T] with Extractable[T]`.
  */
 class ReadWriteVar[T](init: T) extends UpdatableVar[T](init)
-

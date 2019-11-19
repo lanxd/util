@@ -1,10 +1,5 @@
-junit_tests(name='scala',
-  dependencies=[
-    '3rdparty/jvm/com/twitter/common:io',
-    '3rdparty/jvm/junit',
-    '3rdparty/jvm/org/mockito:mockito-all',
-    '3rdparty/jvm/org/scalatest',
-    'util/util-zk-test'
-  ],
-  sources=rglobs('*.scala')
+target(
+    dependencies = [
+        "util/util-zk-test/src/test/scala/com/twitter/zk",
+    ],
 )

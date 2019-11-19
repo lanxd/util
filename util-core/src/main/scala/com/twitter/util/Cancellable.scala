@@ -12,7 +12,6 @@ import java.util.concurrent.atomic.AtomicBoolean
  * guarantee the cancellation of the computation; rather it is a hint
  * that the provider of the computation may choose to ignore.
  */
-
 trait Cancellable {
   def isCancelled: Boolean
 
@@ -20,7 +19,7 @@ trait Cancellable {
    * Cancel the computation.  The cancellation is propagated to linked
    * cancellable objects.
    */
-  def cancel()
+  def cancel(): Unit
 
   /**
    * Link this cancellable computation to 'other'.  This means
@@ -32,16 +31,16 @@ trait Cancellable {
 object Cancellable {
   val nil: Cancellable = new Cancellable {
     def isCancelled = false
-    def cancel() {}
-    def linkTo(other: Cancellable) {}
+    def cancel(): Unit = {}
+    def linkTo(other: Cancellable): Unit = {}
   }
 }
 
 class CancellableSink(f: => Unit) extends Cancellable {
   private[this] val wasCancelled = new AtomicBoolean(false)
-  def isCancelled = wasCancelled.get
-  def cancel() { if (wasCancelled.compareAndSet(false, true)) f }
-  def linkTo(other: Cancellable) {
+  def isCancelled: Boolean = wasCancelled.get
+  def cancel(): Unit = { if (wasCancelled.compareAndSet(false, true)) f }
+  def linkTo(other: Cancellable): Unit = {
     throw new Exception("linking not supported in CancellableSink")
   }
 }

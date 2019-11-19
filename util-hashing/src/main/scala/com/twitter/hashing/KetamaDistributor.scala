@@ -1,29 +1,70 @@
 package com.twitter.hashing
 
-import java.nio.{ByteBuffer, ByteOrder}
 import java.security.MessageDigest
-import java.util.TreeMap
-
-import scala.collection.JavaConversions._
 
 case class KetamaNode[A](identifier: String, weight: Int, handle: A)
 
+/**
+ * @note Certain versions of libmemcached return subtly different results for points on
+ * ring. In order to always hash a key to the same server as the
+ * clients who depend on those versions of libmemcached, we have to reproduce their result.
+ * If the `oldLibMemcachedVersionComplianceMode` is `true` the behavior will be reproduced.
+ */
 class KetamaDistributor[A](
-  _nodes: Seq[KetamaNode[A]],
+  ketamaNodes: Seq[KetamaNode[A]],
   numReps: Int,
-  // Certain versions of libmemcached return subtly different results for points on
-  // ring. In order to always hash a key to the same server as the
-  // clients who depend on those versions of libmemcached, we have to reproduce their result.
-  // If the oldLibMemcachedVersionComplianceMode is true the behavior will be reproduced.
-  oldLibMemcachedVersionComplianceMode: Boolean = false
-) extends Distributor[A] {
-  private val continuum = {
-    val continuum = new TreeMap[Long, KetamaNode[A]]()
+  oldLibMemcachedVersionComplianceMode: Boolean = false)
+    extends Distributor[A] {
 
-    val nodeCount   = _nodes.size
-    val totalWeight = _nodes.foldLeft(0) { _ + _.weight }
+  /**
+   * Extract a little-endian integer from a given byte array starting at `offset`.
+   */
+  @inline private[hashing] def byteArrayToLE(bytes: Array[Byte], offset: Int): Int =
+    bytes(3 + offset) << 24 |
+      (bytes(2 + offset) & 0xff) << 16 |
+      (bytes(1 + offset) & 0xff) << 8 |
+      bytes(0 + offset) & 0xff
 
-    _nodes foreach { node =>
+  /**
+   * Feeds a given integer `i` into a [[MessageDigest]] in the way close to
+   *
+   * {{{
+   *   md.update(i.toString.getBytes)
+   * }}}
+   *
+   * But without allocations: no to-string, no to-byte-array conversions.
+   */
+  @inline private[hashing] def hashInt(i: Int, md: MessageDigest): Unit = {
+    var j = i
+    var div = Math.pow(10, Math.log10(i).toInt).toInt
+    // We're moving from left to right.
+    // For example, 123 should result in 49 ("1"), 50 ("2"), 51 ("3") bytes respectfully.
+    while (j > 9 || div >= 10) {
+      val d = j / div
+      if (d != 0) {
+        md.update(('0' + d).toByte)
+        j = j % div
+      } else if (j != i) {
+        md.update('0'.toByte)
+      }
+      div = div / 10
+    }
+
+    md.update(('0' + j).toByte)
+  }
+
+  private[this] val continuum: java.util.TreeMap[Long, KetamaNode[A]] = {
+    val md5 = MessageDigest.getInstance("MD5")
+    val underlying = new java.util.TreeMap[Long, KetamaNode[A]]()
+    val dash: Byte = '-'.toByte
+
+    val nodeCount = ketamaNodes.size
+    val totalWeight = ketamaNodes.foldLeft(0) { _ + _.weight }
+
+    val it = ketamaNodes.iterator
+    while (it.hasNext) {
+      val node = it.next()
+
       val pointsOnRing = if (oldLibMemcachedVersionComplianceMode) {
         val percent = node.weight.toFloat / totalWeight.toFloat
         (percent * numReps / 4 * nodeCount.toFloat + 0.0000000001).toInt
@@ -32,51 +73,55 @@ class KetamaDistributor[A](
         (percent * nodeCount * (numReps / 4) + 0.0000000001).toInt
       }
 
-      for (i <- 0 until pointsOnRing) {
-        val key = node.identifier + "-" + i
-        for (k <- 0 until 4) {
-          continuum += computeHash(key, k) -> node
-        }
+      val prefix = node.identifier.getBytes("UTF-8")
+
+      var i = 0
+      while (i < pointsOnRing) {
+        md5.update(prefix)
+        md5.update(dash)
+
+        hashInt(i, md5)
+
+        val buffer = md5.digest()
+
+        underlying.put(byteArrayToLE(buffer, 0).toLong & 0xffffffffL, node)
+        underlying.put(byteArrayToLE(buffer, 4).toLong & 0xffffffffL, node)
+        underlying.put(byteArrayToLE(buffer, 8).toLong & 0xffffffffL, node)
+        underlying.put(byteArrayToLE(buffer, 12).toLong & 0xffffffffL, node)
+
+        i += 1
       }
     }
 
     if (!oldLibMemcachedVersionComplianceMode) {
-      assert(continuum.size <= numReps * nodeCount)
-      assert(continuum.size >= numReps * (nodeCount - 1))
+      assert(underlying.size <= numReps * nodeCount)
+      assert(underlying.size >= numReps * (nodeCount - 1))
     }
 
-    continuum
+    underlying
   }
 
-  def nodes = _nodes map { _.handle }
-  def nodeCount = _nodes.size
+  def nodes: Seq[A] = ketamaNodes.map(_.handle)
+  def nodeCount: Int = ketamaNodes.size
 
-  private def mapEntryForHash(hash: Long) = {
-    // hashes are 32-bit because they are 32-bit on the libmemcached and
-    // we need to maintain compatibility with libmemcached
-    val truncatedHash = hash & 0xffffffffL
+  // hashes are 32-bit because they are 32-bit on the libmemcached and
+  // we need to maintain compatibility with libmemcached
+  private[this] def truncateHash(hash: Long): Long = hash & 0xffffffffL
 
-    Option(continuum.ceilingEntry(truncatedHash))
-        .getOrElse(continuum.firstEntry)
+  private def mapEntryForHash(hash: Long): java.util.Map.Entry[Long, KetamaNode[A]] = {
+    val truncatedHash = truncateHash(hash)
+    val entry = continuum.ceilingEntry(truncatedHash)
+    if (entry == null) continuum.firstEntry else entry
   }
 
-  def entryForHash(hash: Long) = {
+  def partitionIdForHash(hash: Long): Long =
+    mapEntryForHash(hash).getKey
+
+  def entryForHash(hash: Long): (Long, A) = {
     val entry = mapEntryForHash(hash)
     (entry.getKey, entry.getValue.handle)
   }
 
-  def nodeForHash(hash: Long) = {
+  def nodeForHash(hash: Long): A =
     mapEntryForHash(hash).getValue.handle
-  }
-
-  protected def computeHash(key: String, alignment: Int) = {
-    val hasher = MessageDigest.getInstance("MD5")
-    hasher.update(key.getBytes("utf-8"))
-    val buffer = ByteBuffer.wrap(hasher.digest)
-    buffer.order(ByteOrder.LITTLE_ENDIAN)
-    buffer.position(alignment << 2)
-    buffer.getInt.toLong & 0xffffffffL
-  }
 }
-
-

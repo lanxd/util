@@ -1,9 +1,10 @@
 package com.twitter.util
 
 import java.util.concurrent.CancellationException
-import java.util.logging.{Level, Logger}
+import java.util.logging.Logger
 
-import scala.collection.mutable
+import scala.collection.{mutable, Iterable}
+import scala.collection.mutable.ArrayBuffer
 
 /**
  * A "batcher" that takes a function `Seq[In] => Future[Seq[Out]]` and
@@ -29,22 +30,22 @@ private[util] class BatchExecutor[In, Out](
   sizeThreshold: Int,
   timeThreshold: Duration = Duration.Top,
   sizePercentile: => Float = 1.0f,
-  f: Seq[In] => Future[Seq[Out]]
+  f: Iterable[In] => Future[Seq[Out]]
 )(
-  implicit timer: Timer
-) extends Function1[In, Future[Out]] { batcher =>
+  implicit timer: Timer)
+    extends Function1[In, Future[Out]] { batcher =>
   import java.util.logging.Level.WARNING
 
   class ScheduledFlush(after: Duration, timer: Timer) {
-    @volatile var cancelled = false
-    val task = timer.schedule(after.fromNow) { flush() }
+    @volatile var cancelled: Boolean = false
+    val task: TimerTask = timer.schedule(after.fromNow) { flush() }
 
-    def cancel() {
+    def cancel(): Unit = {
       cancelled = true
       task.cancel()
     }
 
-    def flush() {
+    def flush(): Unit = {
       val doAfter = batcher.synchronized {
         if (!cancelled)
           flushBatch()
@@ -55,14 +56,15 @@ private[util] class BatchExecutor[In, Out](
     }
   }
 
-  val log = Logger.getLogger("Future.batched")
+  val log: Logger = Logger.getLogger("Future.batched")
 
   // operations on these are synchronized on `this`.
-  val buf = new mutable.ArrayBuffer[(In, Promise[Out])](sizeThreshold)
+  val buf: ArrayBuffer[Tuple2[In, Promise[Out]]] =
+    new mutable.ArrayBuffer[(In, Promise[Out])](sizeThreshold)
   var scheduled: Option[ScheduledFlush] = scala.None
-  var currentBufThreshold = newBufThreshold
+  var currentBufThreshold: Int = newBufThreshold
 
-  def currentBufPercentile = sizePercentile match {
+  def currentBufPercentile: Float = sizePercentile match {
     case tooHigh if tooHigh > 1.0f =>
       log.log(WARNING, "value returned for sizePercentile (%f) was > 1.0f, using 1.0", tooHigh)
       1.0f
@@ -74,10 +76,10 @@ private[util] class BatchExecutor[In, Out](
     case p => p
   }
 
-  def newBufThreshold =
+  def newBufThreshold: Int =
     math.round(currentBufPercentile * sizeThreshold) match {
       case tooLow if tooLow < 1 => 1
-      case size =>  math.min(size, sizeThreshold)
+      case size => math.min(size, sizeThreshold)
     }
 
   def apply(t: In): Future[Out] = enqueue(t)
@@ -90,7 +92,8 @@ private[util] class BatchExecutor[In, Out](
         flushBatch()
       else {
         scheduleFlushIfNecessary()
-        () => ()
+        () =>
+          ()
       }
     }
 
@@ -107,7 +110,7 @@ private[util] class BatchExecutor[In, Out](
     doAfter()
   }
 
-  def scheduleFlushIfNecessary() {
+  def scheduleFlushIfNecessary(): Unit = {
     if (timeThreshold < Duration.Top && scheduled.isEmpty)
       scheduled = Some(new ScheduledFlush(timeThreshold, timer))
   }
@@ -115,30 +118,32 @@ private[util] class BatchExecutor[In, Out](
   def flushBatch(): () => Unit = {
     // this must be executed within a `synchronized` block.
     val prevBatch = new mutable.ArrayBuffer[(In, Promise[Out])](buf.length)
-    buf.copyToBuffer(prevBatch)
+    prevBatch ++= buf
     buf.clear()
 
     scheduled foreach { _.cancel() }
     scheduled = scala.None
-    currentBufThreshold = newBufThreshold  // set the next batch's size
+    currentBufThreshold = newBufThreshold // set the next batch's size
 
-    () => try {
-      executeBatch(prevBatch)
-    } catch {
-      case e: Throwable =>
-        log.log(WARNING, "unhandled exception caught in Future.batched: %s".format(e.toString), e)
-    }
+    () =>
+      try {
+        executeBatch(prevBatch)
+      } catch {
+        case e: Throwable =>
+          log.log(WARNING, "unhandled exception caught in Future.batched: %s".format(e.toString), e)
+      }
   }
 
-  def executeBatch(batch: Seq[(In, Promise[Out])]) {
-    val uncancelled = batch filter { case (in, p) =>
-      p.isInterrupted match {
-        case Some(_cause) =>
-          p.setException(new CancellationException)
-          false
+  def executeBatch(batch: Iterable[(In, Promise[Out])]): Unit = {
+    val uncancelled = batch.filter {
+      case (in, p) =>
+        p.isInterrupted match {
+          case Some(_cause) =>
+            p.setException(new CancellationException)
+            false
 
-        case scala.None => true
-      }
+          case scala.None => true
+        }
     }
 
     val ins = uncancelled map { case (in, _) => in }
@@ -149,8 +154,9 @@ private[util] class BatchExecutor[In, Out](
 
     f(ins) respond {
       case Return(outs) =>
-        (outs zip promises) foreach { case (out, p) =>
-          p() = Return(out)
+        (outs zip promises) foreach {
+          case (out, p) =>
+            p() = Return(out)
         }
 
       case Throw(e) =>

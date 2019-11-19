@@ -1,19 +1,17 @@
 package com.twitter.util
 
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import java.util.concurrent.{Future => JFuture, _}
-import org.junit.runner.RunWith
 import org.scalatest.FunSuite
 import org.scalatest.concurrent.Eventually
-import org.scalatest.junit.JUnitRunner
 import org.scalatest.time.{Millis, Seconds, Span}
 import scala.runtime.NonLocalReturnControl
+import scala.util.control.NonFatal
 
-@RunWith(classOf[JUnitRunner])
 class FuturePoolTest extends FunSuite with Eventually {
 
-  implicit override val patienceConfig =
-    PatienceConfig(timeout = scaled(Span(2, Seconds)), interval = scaled(Span(5, Millis)))
+  implicit override val patienceConfig: PatienceConfig =
+    PatienceConfig(timeout = scaled(Span(15, Seconds)), interval = scaled(Span(5, Millis)))
 
   test("FuturePool should dispatch to another thread") {
     val executor = Executors.newFixedThreadPool(1)
@@ -23,7 +21,7 @@ class FuturePoolTest extends FunSuite with Eventually {
     val result = pool { Await.result(source) } // simulate blocking call
 
     source.setValue(1)
-    assert(Await.result(result) === 1)
+    assert(Await.result(result) == 1)
   }
 
   test("Executor failing contains failures") {
@@ -42,7 +40,7 @@ class FuturePoolTest extends FunSuite with Eventually {
     }
     Await.ready(result1)
 
-    assert(runCount.get() === 0)
+    assert(runCount.get() == 0)
   }
 
   test("does not execute interrupted tasks") {
@@ -57,17 +55,18 @@ class FuturePoolTest extends FunSuite with Eventually {
     val result1 = pool { runCount.incrementAndGet(); Await.result(source1) }
     val result2 = pool { runCount.incrementAndGet(); Await.result(source2) }
 
-    result2.raise(new Exception)
+    val exc = new CancellationException
+    result2.raise(exc)
     source1.setValue(1)
 
     // The executor will run the task for result 2, but the wrapper
     // in FuturePool will throw away the work if the future
     // representing the outcome has already been interrupted,
     // and will set the result to a CancellationException
-    eventually { assert(executor.getCompletedTaskCount === 2) }
+    eventually { assert(executor.getCompletedTaskCount == 2) }
 
-    assert(runCount.get() === 1)
-    assert(Await.result(result1)  === 1)
+    assert(runCount.get() == 1)
+    assert(Await.result(result1) == 1)
     intercept[CancellationException] { Await.result(result2) }
   }
 
@@ -92,13 +91,13 @@ class FuturePoolTest extends FunSuite with Eventually {
       runCount.get
     }
 
-    startedLatch.await(1.second)
+    startedLatch.await(1, TimeUnit.SECONDS)
     result.raise(new Exception)
     cancelledLatch.countDown()
 
-    eventually { assert(executor.getCompletedTaskCount === 1) }
+    eventually { assert(executor.getCompletedTaskCount == 1) }
 
-    assert(runCount.get() === 2)
+    assert(runCount.get() == 2)
     intercept[RuntimeException] { Await.result(result) }
   }
 
@@ -112,7 +111,7 @@ class FuturePoolTest extends FunSuite with Eventually {
 
     val rv = pool { "yay!" }
 
-    assert(rv.isDefined === true)
+    assert(rv.isDefined)
     intercept[RejectedExecutionException] { Await.result(rv) }
 
     source.setValue(1)
@@ -130,15 +129,16 @@ class FuturePoolTest extends FunSuite with Eventually {
         while (true) {
           Thread.sleep(Long.MaxValue)
         }
-      } catch { case _: InterruptedException =>
-        interrupted.setDone()
+      } catch {
+        case _: InterruptedException =>
+          interrupted.setDone()
       }
     }
 
     Await.result(started)
     f.raise(new RuntimeException("foo"))
     intercept[RuntimeException] { Await.result(f) }
-    assert(Await.result(interrupted) === ())
+    assert(Await.result(interrupted.liftToTry) == Return(()))
   }
 
   test("not interrupt threads when not interruptible") {
@@ -156,25 +156,25 @@ class FuturePoolTest extends FunSuite with Eventually {
     Await.result(a)
     f.raise(new RuntimeException("foo"))
     b.setDone()
-    assert(Await.result(f) === 1)
+    assert(Await.result(f) == 1)
   }
 
   test("satisfies result promise on fatal exceptions thrown by task") {
     val executor = Executors.newFixedThreadPool(1)
     val pool = FuturePool(executor)
     val fatal = new LinkageError
-    assert(!NonFatal.isNonFatal(fatal))
+    assert(!NonFatal(fatal))
     val rv = pool { throw fatal }
 
     val ex = intercept[ExecutionException] { Await.result(rv) }
-    assert(ex.getCause === fatal)
+    assert(ex.getCause == fatal)
   }
 
   class PoolCtx {
-    val executor = Executors.newFixedThreadPool(1)
-    val pool = FuturePool(executor)
+    val executor: ExecutorService = Executors.newFixedThreadPool(1)
+    val pool: ExecutorServiceFuturePool = FuturePool(executor)
 
-    val pools = Seq(FuturePool.immediatePool, pool)
+    val pools: Seq[FuturePool] = Seq(FuturePool.immediatePool, pool)
   }
 
   test("handles NonLocalReturnControl properly") {
@@ -187,11 +187,45 @@ class FuturePoolTest extends FunSuite with Eventually {
 
         val e = intercept[FutureNonLocalReturnControl] { Await.result(rv) }
         val f = intercept[NonLocalReturnControl[String]] { throw e.getCause }
-        assert(f.value === "OK")
+        assert(f.value == "OK")
       }
       "FINISHED"
     }
 
-    assert(fake() === "FINISHED")
+    assert(fake() == "FINISHED")
   }
+
+  test("FuturePool metrics") {
+    // We want isolation and thus can't use FuturePool.unboundedPool
+    // But we want to make sure it will have the correct behavior.
+    // We compromise by roughly creating an ExecutorService/FuturePool
+    // that behaves the same.
+    val executor = Executors.newCachedThreadPool()
+    val pool = new ExecutorServiceFuturePool(executor)
+    // verify the initial state
+    assert(pool.poolSize == 0)
+    assert(pool.numActiveTasks == 0)
+    assert(pool.numCompletedTasks == 0)
+
+    // execute a task we can control
+    val latch = new CountDownLatch(1)
+    val future = pool {
+      latch.await(10, TimeUnit.SECONDS)
+      true
+    }
+    eventually { assert(pool.poolSize == 1) }
+    eventually { assert(pool.numActiveTasks == 1) }
+    eventually { assert(pool.numCompletedTasks == 0) }
+
+    // let the task complete
+    latch.countDown()
+    Await.ready(future, 5.seconds)
+    eventually { assert(pool.poolSize == 1) }
+    eventually { assert(pool.numActiveTasks == 0) }
+    eventually { assert(pool.numCompletedTasks == 1) }
+
+    // cleanup.
+    executor.shutdown()
+  }
+
 }

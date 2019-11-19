@@ -1,6 +1,5 @@
-junit_tests(name='java',
-  dependencies=[
-    'util/util-zk-test'
-  ],
-  sources=rglobs('*.java')
+target(
+    dependencies = [
+        "util/util-zk-test/src/test/java/com/twitter/zk",
+    ],
 )

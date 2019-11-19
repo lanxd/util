@@ -1,6 +1,5 @@
 package com.twitter.finagle.stats;
 
-import com.twitter.util.Future$;
 import com.twitter.util.Future;
 
 import org.junit.Test;
@@ -8,6 +7,9 @@ import org.junit.Test;
 import java.lang.Integer;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
+
+import scala.Function0;
+import scala.collection.immutable.Seq;
 
 /**
  * Java compatibility layer for {@link com.twitter.finagle.stats.StatsReceiver}.
@@ -22,7 +24,7 @@ public final class StatsReceiverCompilationTest {
   @Test
   public void testStatMethods() {
     InMemoryStatsReceiver sr = new InMemoryStatsReceiver();
-    Stat stat = StatsReceivers.stat(sr, "hello", "world");
+    Stat stat = sr.stat("hello", "world");
     Callable<Integer> callable = new Callable<Integer>() {
       public Integer call() {
         return 3;
@@ -59,8 +61,48 @@ public final class StatsReceiverCompilationTest {
   public void testCounterMethods() {
     InMemoryStatsReceiver sr = new InMemoryStatsReceiver();
     sr.isNull();
-    Counter counter = StatsReceivers.counter(sr.scopeSuffix("bah").scope("foo"), "hello", "world");
+    Counter counter = sr.counter("hello", "world");
     counter.incr();
     counter.incr(100);
+  }
+
+  public void testScope() {
+    InMemoryStatsReceiver sr = new InMemoryStatsReceiver();
+    StatsReceiver sr2 = sr.scope();
+    StatsReceiver sr3 = sr.scope("a");
+    StatsReceiver sr4 = sr.scope("a", "s", "d");
+    StatsReceiver sr5 = sr.scopeSuffix("bah").scope("foo");
+  }
+
+  @Test
+  public void testAbstractStatsReceiver() {
+    final StatsReceiver nullSr = NullStatsReceiver.get();
+    StatsReceiver sr = new AbstractStatsReceiver() {
+
+      @Override
+      public Stat statImpl(Verbosity verbosity, scala.collection.Seq<String> name) {
+        return nullSr.stat(verbosity, name.toSeq());
+      }
+      
+      @Override
+      public Object repr() {
+        return this;
+      }
+
+      @Override
+      public boolean isNull() {
+        return false;
+      }
+
+      @Override
+      public Counter counterImpl(Verbosity verbosity, scala.collection.Seq<String> name) {
+        return nullSr.counter(name.toSeq());
+      }
+
+      @Override
+      public Gauge addGaugeImpl(Verbosity verbosity, scala.collection.Seq<String> name, Function0<Object> f) {
+        return nullSr.addGauge(verbosity, name.toSeq(), f);
+      }
+    };
   }
 }

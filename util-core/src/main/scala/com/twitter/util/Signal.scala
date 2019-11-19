@@ -5,7 +5,7 @@
  * not use this file except in compliance with the License. You may obtain
  * a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *     https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,18 +21,18 @@ import java.lang.reflect.{InvocationHandler, Method, Proxy}
 import scala.collection.{Map, Set, mutable}
 
 object SignalHandlerFactory {
-  def apply() = {
+  def apply(): Option[SunSignalHandler] = {
     // only one actual implementation for now
     SunSignalHandler.instantiate
   }
 }
 
 trait SignalHandler {
-  def handle(signal: String, handlers: Map[String, Set[String => Unit]])
+  def handle(signal: String, handlers: Map[String, Set[String => Unit]]): Unit
 }
 
 object SunSignalHandler {
-  def instantiate() = {
+  def instantiate(): Option[SunSignalHandler] = {
     try {
       Class.forName("sun.misc.Signal")
       Some(new SunSignalHandler())
@@ -48,19 +48,25 @@ class SunSignalHandler extends SignalHandler {
   private val handleMethod = signalClass.getMethod("handle", signalClass, signalHandlerClass)
   private val nameMethod = signalClass.getMethod("getName")
 
-  def handle(signal: String, handlers: Map[String, Set[String => Unit]]) {
-    val sunSignal = signalClass.getConstructor(classOf[String]).newInstance(signal).asInstanceOf[Object]
-    val proxy = Proxy.newProxyInstance(signalHandlerClass.getClassLoader, Array[Class[_]](signalHandlerClass),
-      new InvocationHandler {
-        def invoke(proxy: Object, method: Method, args: Array[Object]) = {
-          if (method.getName() == "handle") {
-            handlers(signal).foreach { x =>
-              x(nameMethod.invoke(args(0)).asInstanceOf[String])
+  def handle(signal: String, handlers: Map[String, Set[String => Unit]]): Unit = {
+    val sunSignal =
+      signalClass.getConstructor(classOf[String]).newInstance(signal).asInstanceOf[Object]
+    val proxy = Proxy
+      .newProxyInstance(
+        signalHandlerClass.getClassLoader,
+        Array[Class[_]](signalHandlerClass),
+        new InvocationHandler {
+          def invoke(proxy: Object, method: Method, args: Array[Object]) = {
+            if (method.getName() == "handle") {
+              handlers(signal).foreach { x =>
+                x(nameMethod.invoke(args(0)).asInstanceOf[String])
+              }
             }
+            null
           }
-          null
         }
-      }).asInstanceOf[Object]
+      )
+      .asInstanceOf[Object]
 
     handleMethod.invoke(null, sunSignal, proxy)
   }
@@ -73,7 +79,7 @@ object HandleSignal {
    * Set the callback function for a named unix signal.
    * For now, this only works on the Sun^H^H^HOracle JVM.
    */
-  def apply(posixSignal: String)(f: String => Unit) {
+  def apply(posixSignal: String)(f: String => Unit): Unit = {
     if (!handlers.contains(posixSignal)) {
       handlers.synchronized {
         SignalHandlerFactory().foreach { _.handle(posixSignal, handlers) }
@@ -86,7 +92,7 @@ object HandleSignal {
     }
   }
 
-  def clear(posixSignal: String) {
+  def clear(posixSignal: String): Unit = {
     handlers.synchronized {
       handlers(posixSignal).clear()
     }

@@ -5,6 +5,9 @@ import org.junit.Test;
 
 import scala.runtime.BoxedUnit;
 
+import static com.twitter.util.Function.func;
+import static com.twitter.util.Function.func0;
+
 public class TimeCompilationTest {
 
   @Test
@@ -59,8 +62,8 @@ public class TimeCompilationTest {
     Time b = a.plus(Duration.fromMilliseconds(2222));
     Time c = b.minus(Duration.fromMilliseconds(3333));
 
-    Assert.assertEquals(a, a.plus(Duration.zero()));
-    Assert.assertEquals(a, a.minus(Duration.zero()));
+    Assert.assertEquals(a, a.plus(Duration.Zero()));
+    Assert.assertEquals(a, a.minus(Duration.Zero()));
     Assert.assertEquals(5555, b.inMilliseconds());
     Assert.assertEquals(2222, c.inMilliseconds());
   }
@@ -79,6 +82,14 @@ public class TimeCompilationTest {
     Time b = a.floor(Duration.fromMicroseconds(1));
 
     Assert.assertEquals(8, b.inMicroseconds());
+  }
+
+  @Test
+  public void testCeil() {
+    Time a = Time.fromNanoseconds(6666);
+    Time b = a.ceil(Duration.fromMicroseconds(1));
+
+    Assert.assertEquals(7, b.inMicroseconds());
   }
 
   @Test
@@ -106,23 +117,17 @@ public class TimeCompilationTest {
   @Test
   public void testWithTimeAt() {
     Time time = Time.fromMilliseconds(123456L);
-    Time.withTimeAt(time, new Function<TimeControl, BoxedUnit>() {
-      public BoxedUnit apply(TimeControl timeControl) {
-        // Time.now() == time
+    Time.withTimeAt(time, func(timeControl -> {
+      Assert.assertEquals(Time.now(), time);
 
-        // you can control time via the `TimeControl` instance.
-        timeControl.advance(Duration.fromSeconds(2));
-        FuturePools.unboundedPool().apply(
-          new Function0<BoxedUnit>() {
-            public BoxedUnit apply() {
-              // Time.now() == time + 2.seconds
-              return BoxedUnit.UNIT;
-            }
-          }
-        );
-        return null;
-      }
-    });
+      // you can control time via the `TimeControl` instance.
+      timeControl.advance(Duration.fromSeconds(2));
+      FuturePools.unboundedPool().apply(func0(() -> {
+        assert(Time.now().equals(time.plus(Duration.fromSeconds(2))));
+        return BoxedUnit.UNIT;
+      }));
+      return null;
+    }));
   }
 
 }

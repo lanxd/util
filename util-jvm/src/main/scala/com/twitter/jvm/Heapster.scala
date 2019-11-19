@@ -5,7 +5,7 @@
  * not use this file except in compliance with the License. You may obtain
  * a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *     https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -25,21 +25,27 @@ import com.twitter.util.Duration
  */
 class Heapster(klass: Class[_]) {
   private val startM = klass.getDeclaredMethod("start")
-  private val stopM  = klass.getDeclaredMethod("stop")
+  private val stopM = klass.getDeclaredMethod("stop")
   private val dumpProfileM =
     klass.getDeclaredMethod("dumpProfile", classOf[java.lang.Boolean])
   private val clearProfileM = klass.getDeclaredMethod("clearProfile")
   private val setSamplingPeriodM =
     klass.getDeclaredMethod("setSamplingPeriod", classOf[java.lang.Integer])
 
-  def start() { startM.invoke(null) }
-  def shutdown() { stopM.invoke(null) }
-  def setSamplingPeriod(period: java.lang.Integer) { setSamplingPeriodM.invoke(null, period) }
-  def clearProfile() { clearProfileM.invoke(null) }
+  def start(): Unit = { startM.invoke(null) }
+  def shutdown(): Unit = { stopM.invoke(null) }
+  def setSamplingPeriod(period: java.lang.Integer): Unit = {
+    setSamplingPeriodM.invoke(null, period)
+  }
+  def clearProfile(): Unit = { clearProfileM.invoke(null) }
   def dumpProfile(forceGC: java.lang.Boolean): Array[Byte] =
     dumpProfileM.invoke(null, forceGC).asInstanceOf[Array[Byte]]
 
-  def profile(howlong: Duration, samplingPeriod: Int = 10<<19, forceGC: Boolean = true) = {
+  def profile(
+    howlong: Duration,
+    samplingPeriod: Int = 10 << 19,
+    forceGC: Boolean = true
+  ): Array[Byte] = {
     clearProfile()
     setSamplingPeriod(samplingPeriod)
 
@@ -61,4 +67,3 @@ object Heapster {
     }
   }
 }
-

@@ -5,7 +5,7 @@
  * not use this file except in compliance with the License. You may obtain
  * a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *     https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,6 +22,8 @@ import java.util.{logging => javalog}
 
 import com.twitter.concurrent.NamedPoolThreadFactory
 import com.twitter.util.{TwitterDateFormat, NetUtil}
+import java.text.{DateFormat, SimpleDateFormat}
+import java.util.concurrent.Future
 
 object SyslogHandler {
   val DEFAULT_PORT = 514
@@ -65,8 +67,8 @@ object SyslogHandler {
     }
   }
 
-  val ISO_DATE_FORMAT = TwitterDateFormat("yyyy-MM-dd'T'HH:mm:ss")
-  val OLD_SYSLOG_DATE_FORMAT = TwitterDateFormat("MMM dd HH:mm:ss")
+  val ISO_DATE_FORMAT: SimpleDateFormat = TwitterDateFormat("yyyy-MM-dd'T'HH:mm:ss")
+  val OLD_SYSLOG_DATE_FORMAT: SimpleDateFormat = TwitterDateFormat("MMM dd HH:mm:ss")
 
   /**
    * Generates a HandlerFactory that returns a SyslogHandler.
@@ -82,23 +84,19 @@ object SyslogHandler {
     port: Int = SyslogHandler.DEFAULT_PORT,
     formatter: Formatter = new Formatter(),
     level: Option[Level] = None
-  ) = () => new SyslogHandler(server, port, formatter, level)
+  ): () => SyslogHandler = () => new SyslogHandler(server, port, formatter, level)
 }
 
-class SyslogHandler(
-    val server: String,
-    val port: Int,
-    formatter: Formatter,
-    level: Option[Level])
-  extends Handler(formatter, level) {
+class SyslogHandler(val server: String, val port: Int, formatter: Formatter, level: Option[Level])
+    extends Handler(formatter, level) {
 
   private val socket = new DatagramSocket
   private[logging] val dest = new InetSocketAddress(server, port)
 
-  def flush() = { }
-  def close() = { }
+  def flush(): Unit = {}
+  def close(): Unit = {}
 
-  def publish(record: javalog.LogRecord) = {
+  def publish(record: javalog.LogRecord): Unit = {
     val data = formatter.format(record).getBytes
     val packet = new DatagramPacket(data, data.length, dest)
     SyslogFuture {
@@ -136,25 +134,27 @@ class SyslogHandler(
  * Truncate stack traces in exception logging (line count).
  */
 class SyslogFormatter(
-    val hostname: String = NetUtil.getLocalHostName(),
-    val serverName: Option[String] = None,
-    val useIsoDateFormat: Boolean = true,
-    val priority: Int = SyslogHandler.PRIORITY_USER,
-    timezone: Option[String] = None,
-    truncateAt: Int = 0,
-    truncateStackTracesAt: Int = Formatter.DefaultStackTraceSizeLimit)
-  extends Formatter(
-    timezone,
-    truncateAt,
-    truncateStackTracesAt,
-    useFullPackageNames = false,
-    prefix = "") {
+  val hostname: String = NetUtil.getLocalHostName(),
+  val serverName: Option[String] = None,
+  val useIsoDateFormat: Boolean = true,
+  val priority: Int = SyslogHandler.PRIORITY_USER,
+  timezone: Option[String] = None,
+  truncateAt: Int = 0,
+  truncateStackTracesAt: Int = Formatter.DefaultStackTraceSizeLimit)
+    extends Formatter(
+      timezone,
+      truncateAt,
+      truncateStackTracesAt,
+      useFullPackageNames = false,
+      prefix = ""
+    ) {
 
-  override def dateFormat = if (useIsoDateFormat) {
-    SyslogHandler.ISO_DATE_FORMAT
-  } else {
-    SyslogHandler.OLD_SYSLOG_DATE_FORMAT
-  }
+  override def dateFormat: DateFormat =
+    if (useIsoDateFormat) {
+      SyslogHandler.ISO_DATE_FORMAT
+    } else {
+      SyslogHandler.OLD_SYSLOG_DATE_FORMAT
+    }
 
   override def lineTerminator = ""
 
@@ -174,14 +174,16 @@ class SyslogFormatter(
 
 object SyslogFuture {
   private val executor = Executors.newSingleThreadExecutor(
-    new NamedPoolThreadFactory("TWITTER-UTIL-SYSLOG", true/*daemon*/))
-  private val noop = new Runnable { def run() {} }
+    new NamedPoolThreadFactory("TWITTER-UTIL-SYSLOG", true /*daemon*/ )
+  )
+  private val noop = new Runnable { def run(): Unit = {} }
 
-  def apply(action: => Unit) = executor.submit(new Runnable {
-    def run() { action }
-  })
+  def apply(action: => Unit): Future[_] =
+    executor.submit(new Runnable {
+      def run(): Unit = { action }
+    })
 
-  def sync() {
+  def sync(): Unit = {
     val f = executor.submit(noop)
     f.get()
   }

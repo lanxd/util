@@ -1,10 +1,7 @@
 package com.twitter.hashing
 
-import org.junit.runner.RunWith
 import org.scalatest.WordSpec
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
 class DiagnosticsTest extends WordSpec {
   "Diagnostics" should {
     "print distribution" in {
@@ -23,7 +20,8 @@ class DiagnosticsTest extends WordSpec {
         "FNV1A_64" -> KeyHasher.FNV1A_64,
         "CRC32-ITU" -> KeyHasher.CRC32_ITU,
         "HSIEH" -> KeyHasher.HSIEH,
-        "JENKINS" -> KeyHasher.JENKINS
+        "JENKINS" -> KeyHasher.JENKINS,
+        "MURMUR3" -> KeyHasher.MURMUR3
       )
 
       val keys = (1 until 1000000).map(_.toString).toList

@@ -1,9 +1,9 @@
-junit_tests(name='java',
-  dependencies=[
-    '3rdparty/jvm/org/scala-lang:scala-library',
-    'util/util-core/src/test:base',
-    'util/util-core/src/main/scala',
-    'util/util-core/src/main/java'
-  ],
-  sources=rglobs('*.java')
+target(
+    dependencies = [
+        "util/util-core/src/test/java/com/twitter/concurrent",
+        "util/util-core/src/test/java/com/twitter/io",
+        "util/util-core/src/test/java/com/twitter/service",
+        "util/util-core/src/test/java/com/twitter/util",
+        "util/util-core/src/test/java/com/twitter/util/javainterop",
+    ],
 )

@@ -1,16 +1,21 @@
 package com.twitter.app;
 
-import org.junit.Test;
-import com.twitter.util.Duration;
-import com.twitter.util.Function;
-import com.twitter.util.Function0;
-import com.twitter.util.StorageUnit;
-import com.twitter.util.Time;
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+
+import org.junit.Test;
+
+import com.twitter.util.Duration;
+import com.twitter.util.Function;
+import com.twitter.util.StorageUnit;
+import com.twitter.util.Time;
+
+import static com.twitter.util.Function.func0;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.fail;
 
 public class JavaFlagTest {
 
@@ -22,14 +27,14 @@ public class JavaFlagTest {
   static class Named {
     String name;
 
-    public static Flaggable<Named> ofNamed =
+    static Flaggable<Named> ofNamed =
       Flaggable.mandatory(new Function<String, Named>() {
         @Override public Named apply(String n) {
           return new Named(n);
         }
       });
 
-    public Named(String name) {
+    Named(String name) {
       this.name = name;
     }
   }
@@ -57,14 +62,14 @@ public class JavaFlagTest {
 
     Flag<List<Integer>> listFlag = flag.create(
         "list",
-        new ArrayList<Integer>(),
+        new ArrayList<>(),
         "",
         Flaggable.ofJavaList(Flaggable.ofJavaInteger())
     );
 
     Flag<Map<Integer, String>> mapFlag = flag.create(
         "map",
-        new HashMap<Integer, String>(),
+        new HashMap<>(),
         "",
         Flaggable.ofJavaMap(Flaggable.ofJavaInteger(), Flaggable.ofString())
     );
@@ -73,4 +78,31 @@ public class JavaFlagTest {
     Flag<Integer> nonDefaultIntFlag = flag.createMandatory("mandatory-int", "you better supply this", "Integer", Flaggable.ofJavaInteger());
     Flag<String> nonDefaultStringFlag = flag.createMandatory("mandatory-str", "you better supply this", "String", Flaggable.ofString());
   }
+
+  @Test
+  public void testJavaLongFlags() {
+    Flags flags = new Flags("ApplicationName");
+    Flag<Long> longFlag = flags.create("long", 1234567890L, "", Flaggable.ofJavaLong());
+
+    longFlag.parse();
+    assertEquals(1234567890L, longFlag.apply().longValue());
+
+    longFlag.parse("9876543210");
+    assertEquals(9876543210L, longFlag.apply().longValue());
+
+    try {
+      longFlag.parse("9876543210L");
+      fail();
+    } catch (NumberFormatException expected) {
+      assertEquals("For input string: \"9876543210L\"", expected.getMessage());
+    }
+  }
+
+  @Test
+  public void testLet() {
+    Flags flags = new Flags("ApplicationName");
+    Flag<Long> flag = flags.create("long", 1234567890L, "", Flaggable.ofJavaLong());
+    assertEquals("ok", flag.let(5L, func0(() -> "ok")));
+  }
+
 }

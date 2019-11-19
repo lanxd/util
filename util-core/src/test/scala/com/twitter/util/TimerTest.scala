@@ -1,26 +1,31 @@
 package com.twitter.util
 
+import com.twitter.conversions.DurationOps._
+import java.util.concurrent.{CancellationException, ExecutorService, TimeUnit, CountDownLatch}
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.{CancellationException, ExecutorService}
-
-import org.junit.runner.RunWith
 import org.mockito.ArgumentCaptor
 import org.mockito.Matchers.any
 import org.mockito.Mockito.{never, verify, when}
 import org.scalatest.FunSuite
-import org.scalatest.concurrent.Eventually
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
-import org.scalatest.time.{Millis, Seconds, Span}
+import org.scalatest.concurrent.{IntegrationPatience, Eventually}
+import org.scalatestplus.mockito.MockitoSugar
 
-import com.twitter.conversions.time._
+class TimerTest extends FunSuite with MockitoSugar with Eventually with IntegrationPatience {
 
-@RunWith(classOf[JUnitRunner])
-class TimerTest extends FunSuite with MockitoSugar with Eventually  {
-
-  implicit override val patienceConfig =
-    PatienceConfig(timeout = scaled(Span(4, Seconds)), interval = scaled(Span(5, Millis)))
-
+  private def testTimerRunsWithLocals(timer: Timer): Unit = {
+    val timerLocal = new AtomicInteger(0)
+    val local = new Local[Int]
+    val expectedVal = 99
+    local.let(expectedVal) {
+      timer.schedule(Time.now + 10.millis) {
+        timerLocal.set(local().getOrElse(-1))
+      }
+    }
+    eventually {
+      assert(expectedVal == timerLocal.get())
+    }
+    timer.stop()
+  }
 
   test("ThreadStoppingTimer should stop timers in a different thread") {
     val executor = mock[ExecutorService]
@@ -43,9 +48,9 @@ class TimerTest extends FunSuite with MockitoSugar with Eventually  {
 
     val refcounted = new ReferenceCountingTimer(factory)
 
-      verify(factory, never()).apply()
-      refcounted.acquire()
-      verify(factory).apply()
+    verify(factory, never()).apply()
+    refcounted.acquire()
+    verify(factory).apply()
   }
 
   test("ReferenceCountingTimer stops the underlying timer when acquire count reaches 0") {
@@ -67,6 +72,12 @@ class TimerTest extends FunSuite with MockitoSugar with Eventually  {
     verify(underlying, never()).stop()
     refcounted.stop()
     verify(underlying).stop()
+  }
+
+  test("ReferenceCountingTimer should have Locals") {
+    val timer = new ReferenceCountingTimer(() => new JavaTimer())
+    timer.acquire()
+    testTimerRunsWithLocals(timer)
   }
 
   test("ScheduledThreadPoolTimer should initialize and stop") {
@@ -91,7 +102,7 @@ class TimerTest extends FunSuite with MockitoSugar with Eventually  {
     timer.schedule(Time.now + 200.millis) {
       counter.incrementAndGet()
     }
-    eventually { assert(counter.get() === 1) }
+    eventually { assert(counter.get() == 1) }
     timer.stop()
   }
 
@@ -107,22 +118,26 @@ class TimerTest extends FunSuite with MockitoSugar with Eventually  {
     timer.stop()
   }
 
+  test("ScheduledThreadPoolTimer should have Locals") {
+    testTimerRunsWithLocals(new ScheduledThreadPoolTimer())
+  }
+
   test("JavaTimer should not stop working when an exception is thrown") {
     var errors = 0
     var latch = new CountDownLatch(1)
 
     val timer = new JavaTimer {
-      override def logError(t: Throwable) {
+      override def logError(t: Throwable): Unit = {
         errors += 1
-        latch.countDown
+        latch.countDown()
       }
     }
 
     timer.schedule(Time.now) {
-      throw new scala.MatchError
+      throw new scala.MatchError("huh")
     }
 
-    latch.await(30.seconds)
+    latch.await(30, TimeUnit.SECONDS)
 
     assert(errors == 1)
 
@@ -130,10 +145,10 @@ class TimerTest extends FunSuite with MockitoSugar with Eventually  {
     latch = new CountDownLatch(1)
     timer.schedule(Time.now) {
       result = 1 + 1
-      latch.countDown
+      latch.countDown()
     }
 
-    latch.await(30.seconds)
+    latch.await(30, TimeUnit.SECONDS)
 
     assert(result == 2)
     assert(errors == 1)
@@ -150,16 +165,6 @@ class TimerTest extends FunSuite with MockitoSugar with Eventually  {
     timer.stop()
   }
 
-  test("JavaTimer should schedule(pre-epoch)") {
-    val timer = new JavaTimer
-    val counter = new AtomicInteger(0)
-    timer.schedule(Time.Bottom) {
-      counter.incrementAndGet()
-    }
-    eventually { assert(counter.get() == 1) }
-    timer.stop()
-  }
-
   test("JavaTimer should cancel schedule(when)") {
     val timer = new JavaTimer
     val counter = new AtomicInteger(0)
@@ -170,6 +175,10 @@ class TimerTest extends FunSuite with MockitoSugar with Eventually  {
     Thread.sleep(1.seconds.inMillis)
     assert(counter.get() != 1)
     timer.stop()
+  }
+
+  test("JavaTimer should have Locals") {
+    testTimerRunsWithLocals(new JavaTimer())
   }
 
   test("Timer should doLater") {
@@ -245,6 +254,23 @@ class TimerTest extends FunSuite with MockitoSugar with Eventually  {
     }
   }
 
+  test("Timer should schedule(pre-epoch, negative-period)") {
+    Time.withCurrentTimeFrozen { ctl =>
+      val timer = new MockTimer
+      val counter = new AtomicInteger(0)
+
+      timer.schedule(Time.Bottom, Duration.Bottom)(counter.incrementAndGet())
+
+      ctl.advance(1.millis)
+      timer.tick()
+      assert(counter.get() == 1)
+
+      ctl.advance(1.millis)
+      timer.tick()
+      assert(counter.get() == 2)
+    }
+  }
+
   test("Timer should schedule(when)") {
     Time.withCurrentTimeFrozen { ctl =>
       val timer = new MockTimer
@@ -253,6 +279,31 @@ class TimerTest extends FunSuite with MockitoSugar with Eventually  {
       ctl.advance(2.millis)
       timer.tick()
       assert(counter.get() == 1)
+    }
+  }
+
+  test("Tasks created using Timer.schedule(Time) shouldn't be retained after cancellation") {
+    Time.withCurrentTimeFrozen { ctl =>
+      val timer = new MockTimer
+      assert(timer.tasks.isEmpty)
+      val task = timer.schedule(Time.now + 3.seconds)(())
+      assert(timer.tasks.size == 1)
+      task.cancel()
+      assert(timer.tasks.isEmpty)
+    }
+  }
+
+  test("Tasks created using Timer.schedule(Duration) shouldn't be retained after cancellation") {
+    Time.withCurrentTimeFrozen { ctl =>
+      val timer = new MockTimer
+      assert(timer.tasks.isEmpty)
+      val task = timer.schedule(3.seconds)(())
+      eventually { assert(timer.tasks.size == 1) }
+      ctl.advance(30.seconds)
+      timer.tick()
+      eventually { assert(timer.tasks.size == 1) }
+      task.cancel()
+      assert(timer.tasks.isEmpty)
     }
   }
 
@@ -281,4 +332,54 @@ class TimerTest extends FunSuite with MockitoSugar with Eventually  {
       assert(counter.get() == 1)
     }
   }
+
+  private def mockTimerLocalPropagation(timer: MockTimer, localValue: Int): Int = {
+    Time.withCurrentTimeFrozen { tc =>
+      val timerLocal = new AtomicInteger(0)
+      val local = new Local[Int]
+      local.let(localValue) {
+        timer.schedule(Time.now + 10.millis) {
+          timerLocal.set(local().getOrElse(-1))
+        }
+      }
+      tc.advance(20.millis)
+      timer.tick()
+      timerLocal.get()
+    }
+  }
+
+  test("MockTimer propagateLocals") {
+    val timer = new MockTimer()
+    assert(mockTimerLocalPropagation(timer, 99) == 99)
+  }
+
+  private class SomeEx extends Exception
+
+  private def testTimerUsesLocalMonitor(timer: Timer): Unit = {
+    val seen = new AtomicInteger(0)
+    val monitor = Monitor.mk {
+      case _: SomeEx =>
+        seen.incrementAndGet()
+        true
+    }
+    Monitor.using(monitor) {
+      timer.schedule(Time.now + 10.millis) { throw new SomeEx }
+    }
+
+    eventually {
+      assert(1 == seen.get)
+    }
+    timer.stop()
+  }
+
+  test("JavaTimer uses local Monitor") {
+    val timer = new JavaTimer(true, Some("TimerTest"))
+    testTimerUsesLocalMonitor(timer)
+  }
+
+  test("ScheduledThreadPoolTimer uses local Monitor") {
+    val timer = new ScheduledThreadPoolTimer()
+    testTimerUsesLocalMonitor(timer)
+  }
+
 }

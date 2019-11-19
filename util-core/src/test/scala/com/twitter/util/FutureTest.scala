@@ -1,42 +1,70 @@
 package com.twitter.util
 
-import com.twitter.common.objectsize.ObjectSizeCalculator
-import com.twitter.conversions.time._
+import com.twitter.conversions.DurationOps._
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
-import org.junit.runner.RunWith
 import org.mockito.Matchers.any
-import org.mockito.Mockito.{never, verify, when, times}
+import org.mockito.Mockito.{never, times, verify, when}
 import org.mockito.invocation.InvocationOnMock
 import org.mockito.stubbing.Answer
-import org.scalacheck.{Gen, Arbitrary}
+import org.scalacheck.{Arbitrary, Gen}
 import org.scalatest.WordSpec
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
-import org.scalatest.prop.GeneratorDrivenPropertyChecks
+import org.scalatestplus.mockito.MockitoSugar
+import org.scalatestplus.scalacheck.ScalaCheckDrivenPropertyChecks
 import scala.collection.JavaConverters._
 import scala.runtime.NonLocalReturnControl
-import scala.util.control.ControlThrowable
 import scala.util.Random
+import scala.util.control.ControlThrowable
+import scala.util.control.NonFatal
 
-@RunWith(classOf[JUnitRunner])
-class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenPropertyChecks {
+private object FutureTest {
+  def await[A](f: Future[A], timeout: Duration = 5.seconds): A =
+    Await.result(f, timeout)
+
+  sealed trait Result
+  case class Ret(num: Int) extends Result
+  case class Thr(exn: Exception) extends Result
+  case object Nvr extends Result
+
+  def satisfy(p: Promise[Int], result: Result): Unit = result match {
+    case Nvr =>
+    case Thr(exn) => p() = Throw(exn)
+    case Ret(value) => p() = Return(value)
+  }
+
+  def explain(left: Result, right: Result, leftFirst: Boolean): String = {
+    val leftOrRight = if (leftFirst) "left" else "right"
+    s": $left.join($right) where $leftOrRight is satisfied first has an unexpected result"
+  }
+}
+
+class FutureTest extends WordSpec with MockitoSugar with ScalaCheckDrivenPropertyChecks {
+  import FutureTest._
+
   implicit class FutureMatcher[A](future: Future[A]) {
-    def mustProduce(expected: Try[A]) {
+    def mustProduce(expected: Try[A]): Unit = {
       expected match {
         case Throw(ex) =>
           val t = intercept[Throwable] {
-            Await.result(future, 1.second)
+            await(future)
           }
-          assert(t === ex)
+          assert(t == ex)
         case Return(v) =>
-          assert(Await.result(future, 1.second) === v)
+          assert(await(future) == v)
       }
     }
   }
 
+  private object FailingTimer extends Timer {
+    def scheduleOnce(when: Time)(f: => Unit): TimerTask =
+      throw new Exception("schedule called")
+    def schedulePeriodically(when: Time, period: Duration)(f: => Unit): TimerTask =
+      throw new Exception("schedule called")
+    def stop(): Unit = ()
+  }
+
   class HandledMonitor extends Monitor {
-    var handled = null: Throwable
+    var handled: Throwable = _
     def handle(exc: Throwable): Boolean = {
       handled = exc
       true
@@ -51,63 +79,65 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
     def exception[A](exc: Throwable): Future[A] = this(Throw(exc))
   }
 
-  def test(name: String, const: MkConst) {
-    "object Future (%s)".format(name) when {
+  def test(name: String, const: MkConst): Unit = {
+    s"object Future ($name)" when {
       "times" should {
         trait TimesHelper {
           val queue = new ConcurrentLinkedQueue[Promise[Unit]]
           var complete = false
           var failure = false
           var ninterrupt = 0
-          val iteration = Future.times(3) {
+          val iteration: Future[Unit] = Future.times(3) {
             val promise = new Promise[Unit]
             promise.setInterruptHandler { case _ => ninterrupt += 1 }
             queue add promise
             promise
           }
-          iteration onSuccess { _ =>
-            complete = true
-          } onFailure { f =>
-            failure = true
-          }
-          assert(complete === false)
-          assert(failure === false)
+          iteration
+            .onSuccess { _ =>
+              complete = true
+            }
+            .onFailure { _ =>
+              failure = true
+            }
+          assert(!complete)
+          assert(!failure)
         }
 
         "when everything succeeds" in {
           new TimesHelper {
             queue.poll().setDone()
-            assert(complete === false)
-            assert(failure === false)
+            assert(!complete)
+            assert(!failure)
 
             queue.poll().setDone()
-            assert(complete === false)
-            assert(failure === false)
+            assert(!complete)
+            assert(!failure)
 
             queue.poll().setDone()
-            assert(complete === true)
-            assert(failure === false)
+            assert(complete)
+            assert(!failure)
           }
         }
 
         "when some succeed and some fail" in {
           new TimesHelper {
             queue.poll().setDone()
-            assert(complete === false)
-            assert(failure === false)
+            assert(!complete)
+            assert(!failure)
 
             queue.poll().setException(new Exception(""))
-            assert(complete === false)
-            assert(failure === true)
+            assert(!complete)
+            assert(failure)
           }
         }
 
         "when interrupted" in {
           new TimesHelper {
-            assert(ninterrupt === 0)
+            assert(ninterrupt == 0)
             iteration.raise(new Exception)
             for (i <- 1 to 3) {
-              assert(ninterrupt === i)
+              assert(ninterrupt == i)
               queue.poll().setDone()
             }
           }
@@ -117,19 +147,19 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
       "when" in {
         var i = 0
 
-        Await.result {
+        await {
           Future.when(false) {
             Future { i += 1 }
           }
         }
-        assert(i === 0)
+        assert(i == 0)
 
-        Await.result {
+        await {
           Future.when(true) {
             Future { i += 1 }
           }
         }
-        assert(i === 1)
+        assert(i == 1)
       }
 
       "whileDo" should {
@@ -138,56 +168,58 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
           val queue = new ConcurrentLinkedQueue[HandledPromise[Unit]]
           var complete = false
           var failure = false
-          val iteration = Future.whileDo(i < 3) {
+          val iteration: Future[Unit] = Future.whileDo(i < 3) {
             i += 1
             val promise = new HandledPromise[Unit]
-            queue add promise
+            queue.add(promise)
             promise
           }
 
-          iteration onSuccess { _ =>
-            complete = true
-          } onFailure { f =>
-            failure = true
-          }
-          assert(complete === false)
-          assert(failure === false)
+          iteration
+            .onSuccess { _ =>
+              complete = true
+            }
+            .onFailure { _ =>
+              failure = true
+            }
+          assert(!complete)
+          assert(!failure)
         }
 
         "when everything succeeds" in {
           new WhileDoHelper {
             queue.poll().setDone()
-            assert(complete === false)
-            assert(failure === false)
+            assert(!complete)
+            assert(!failure)
 
             queue.poll().setDone()
-            assert(complete === false)
-            assert(failure === false)
+            assert(!complete)
+            assert(!failure)
 
             queue.poll().setDone()
 
-            assert(complete === true)
-            assert(failure === false)
+            assert(complete)
+            assert(!failure)
           }
         }
 
         "when some succeed and some fail" in {
           new WhileDoHelper {
             queue.poll().setDone()
-            assert(complete === false)
-            assert(failure === false)
+            assert(!complete)
+            assert(!failure)
 
             queue.poll().setException(new Exception(""))
-            assert(complete === false)
-            assert(failure === true)
+            assert(!complete)
+            assert(failure)
           }
         }
 
         "when interrupted" in {
           new WhileDoHelper {
-            assert((queue.asScala exists (_.handled.isDefined)) === false)
+            assert(!queue.asScala.exists(_.handled.isDefined))
             iteration.raise(new Exception)
-            assert((queue.asScala forall ( _.handled.isDefined)) === true)
+            assert(queue.asScala.forall(_.handled.isDefined))
           }
         }
       }
@@ -208,8 +240,8 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
           val p2 = new Promise[Int]()
           p2.proxyTo(p1)
           p2.update(Return(5))
-          assert(5 === Await.result(p1))
-          assert(5 === Await.result(p2))
+          assert(5 == await(p1))
+          assert(5 == await(p2))
         }
 
         "proxies failure" in {
@@ -219,104 +251,124 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
 
           val t = new RuntimeException("wurmp")
           p2.update(Throw(t))
-          val ex1 = intercept[RuntimeException] { Await.result(p1) }
-          assert(ex1.getMessage === t.getMessage)
-          val ex2 = intercept[RuntimeException] { Await.result(p2) }
-          assert(ex2.getMessage === t.getMessage)
+          val ex1 = intercept[RuntimeException] { await(p1) }
+          assert(ex1.getMessage == t.getMessage)
+          val ex2 = intercept[RuntimeException] { await(p2) }
+          assert(ex2.getMessage == t.getMessage)
         }
       }
 
       "batched" should {
-        implicit val timer = new MockTimer
+        implicit val timer: MockTimer = new MockTimer
         val result = Seq(4, 5, 6)
 
         "execute after threshold is reached" in {
-          val f = mock[Seq[Int] => Future[Seq[Int]]]
+          val m = mock[Any => Future[Seq[Int]]]
+          val f = mock[scala.collection.Seq[Int] => Future[Seq[Int]]]
+          when(f.compose(any())).thenReturn(m)
+
           val batcher = Future.batched(3)(f)
 
-          when(f.apply(Seq(1,2,3))) thenReturn(Future.value(result))
+          when(m.apply(Iterable(1, 2, 3))).thenReturn(Future.value(result))
           batcher(1)
-          verify(f, never()).apply(any[Seq[Int]])
+          verify(m, never()).apply(any[Seq[Int]])
           batcher(2)
-          verify(f, never()).apply(any[Seq[Int]])
+          verify(m, never()).apply(any[Seq[Int]])
           batcher(3)
-          verify(f).apply(Seq(1,2,3))
+          verify(m).apply(Iterable(1, 2, 3))
         }
 
         "execute after bufSizeFraction threshold is reached" in {
-          val f = mock[Seq[Int] => Future[Seq[Int]]]
-          val batcher = Future.batched(3, sizePercentile = 0.67f)(f)
+          val m = mock[Any => Future[Seq[Int]]]
+          val f = mock[scala.collection.Seq[Int] => Future[Seq[Int]]]
+          when(f.compose(any())).thenReturn(m)
 
-          when(f.apply(Seq(1,2,3))) thenReturn(Future.value(result))
+          val batcher = Future.batched(3, sizePercentile = 0.67f)(f)
+          when(m.apply(Iterable(1, 2, 3))).thenReturn(Future.value(result))
           batcher(1)
-          verify(f, never()).apply(any[Seq[Int]])
+          verify(m, never()).apply(any[Seq[Int]])
           batcher(2)
-          verify(f).apply(Seq(1,2))
+          verify(m).apply(Iterable(1, 2))
         }
 
         "treat bufSizeFraction return value < 0.0f as 1" in {
-          val f = mock[Seq[Int] => Future[Seq[Int]]]
+          val m = mock[Any => Future[Seq[Int]]]
+          val f = mock[scala.collection.Seq[Int] => Future[Seq[Int]]]
+          when(f.compose(any())).thenReturn(m)
+
           val batcher = Future.batched(3, sizePercentile = 0.4f)(f)
 
-          when(f.apply(Seq(1,2,3))) thenReturn(Future.value(result))
+          when(m.apply(Iterable(1, 2, 3))).thenReturn(Future.value(result))
           batcher(1)
-          verify(f).apply(Seq(1))
+          verify(m).apply(Iterable(1))
         }
 
         "treat bufSizeFraction return value > 1.0f should return maxSizeThreshold" in {
-          val f = mock[Seq[Int] => Future[Seq[Int]]]
+          val m = mock[Any => Future[Seq[Int]]]
+          val f = mock[scala.collection.Seq[Int] => Future[Seq[Int]]]
+          when(f.compose(any())).thenReturn(m)
+
           val batcher = Future.batched(3, sizePercentile = 1.3f)(f)
 
-          when(f.apply(Seq(1,2,3))) thenReturn(Future.value(result))
+          when(m.apply(Iterable(1, 2, 3))).thenReturn(Future.value(result))
           batcher(1)
-          verify(f, never()).apply(any[Seq[Int]])
+          verify(m, never()).apply(any[Seq[Int]])
           batcher(2)
-          verify(f, never()).apply(any[Seq[Int]])
+          verify(m, never()).apply(any[Seq[Int]])
           batcher(3)
-          verify(f).apply(Seq(1,2,3))
+          verify(m).apply(Iterable(1, 2, 3))
         }
 
         "execute after time threshold" in {
-          val f = mock[Seq[Int] => Future[Seq[Int]]]
+          val m = mock[Any => Future[Seq[Int]]]
+          val f = mock[scala.collection.Seq[Int] => Future[Seq[Int]]]
+          when(f.compose(any())).thenReturn(m)
+
           val batcher = Future.batched(3, 3.seconds)(f)
 
           Time.withCurrentTimeFrozen { control =>
-            when(f(Seq(1))) thenReturn(Future.value(Seq(4)))
+            when(m(Iterable(1))).thenReturn(Future.value(Seq(4)))
             batcher(1)
-            verify(f, never()).apply(any[Seq[Int]])
+            verify(m, never()).apply(any[Seq[Int]])
 
             control.advance(1.second)
             timer.tick()
-            verify(f, never()).apply(any[Seq[Int]])
+            verify(m, never()).apply(any[Seq[Int]])
 
             control.advance(1.second)
             timer.tick()
-            verify(f, never()).apply(any[Seq[Int]])
+            verify(m, never()).apply(any[Seq[Int]])
 
             control.advance(1.second)
             timer.tick()
-            verify(f).apply(Seq(1))
+            verify(m).apply(Iterable(1))
           }
         }
 
         "only execute once if both are reached" in {
-          val f = mock[Seq[Int] => Future[Seq[Int]]]
+          val m = mock[Any => Future[Seq[Int]]]
+          val f = mock[scala.collection.Seq[Int] => Future[Seq[Int]]]
+          when(f.compose(any())).thenReturn(m)
+
           val batcher = Future.batched(3)(f)
 
           Time.withCurrentTimeFrozen { control =>
-            when(f(Seq(1,2,3))) thenReturn(Future.value(result))
+            when(m(Iterable(1, 2, 3))).thenReturn(Future.value(result))
             batcher(1)
             batcher(2)
             batcher(3)
             control.advance(10.seconds)
             timer.tick()
 
-            verify(f).apply(Seq(1,2,3))
+            verify(m).apply(Iterable(1, 2, 3))
           }
         }
 
         "execute when flushBatch is called" in {
-          val f = mock[Seq[Int] => Future[Seq[Int]]]
+          val m = mock[Any => Future[Seq[Int]]]
+          val f = mock[scala.collection.Seq[Int] => Future[Seq[Int]]]
+          when(f.compose(any())).thenReturn(m)
+
           val batcher = Future.batched(4)(f)
 
           batcher(1)
@@ -324,11 +376,14 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
           batcher(3)
           batcher.flushBatch()
 
-          verify(f).apply(Seq(1,2,3))
+          verify(m).apply(Iterable(1, 2, 3))
         }
 
         "only execute for remaining items when flushBatch is called after size threshold is reached" in {
-          val f = mock[Seq[Int] => Future[Seq[Int]]]
+          val m = mock[Any => Future[Seq[Int]]]
+          val f = mock[scala.collection.Seq[Int] => Future[Seq[Int]]]
+          when(f.compose(any())).thenReturn(m)
+
           val batcher = Future.batched(4)(f)
 
           batcher(1)
@@ -336,14 +391,17 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
           batcher(3)
           batcher(4)
           batcher(5)
-          verify(f, times(1)).apply(Seq(1,2,3,4))
+          verify(m, times(1)).apply(Iterable(1, 2, 3, 4))
 
           batcher.flushBatch()
-          verify(f, times(1)).apply(Seq(5))
+          verify(m, times(1)).apply(Iterable(5))
         }
 
         "only execute once when time threshold is reached after flushBatch is called" in {
-          val f = mock[Seq[Int] => Future[Seq[Int]]]
+          val m = mock[Any => Future[Seq[Int]]]
+          val f = mock[scala.collection.Seq[Int] => Future[Seq[Int]]]
+          when(f.compose(any())).thenReturn(m)
+
           val batcher = Future.batched(4, 3.seconds)(f)
 
           Time.withCurrentTimeFrozen { control =>
@@ -354,12 +412,15 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
             control.advance(10.seconds)
             timer.tick()
 
-            verify(f, times(1)).apply(Seq(1, 2, 3))
+            verify(m, times(1)).apply(Iterable(1, 2, 3))
           }
         }
 
         "only execute once when time threshold is reached before flushBatch is called" in {
-          val f = mock[Seq[Int] => Future[Seq[Int]]]
+          val m = mock[Any => Future[Seq[Int]]]
+          val f = mock[scala.collection.Seq[Int] => Future[Seq[Int]]]
+          when(f.compose(any())).thenReturn(m)
+
           val batcher = Future.batched(4, 3.seconds)(f)
 
           Time.withCurrentTimeFrozen { control =>
@@ -370,55 +431,61 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
             timer.tick()
             batcher.flushBatch()
 
-            verify(f, times(1)).apply(Seq(1, 2, 3))
+            verify(m, times(1)).apply(Iterable(1, 2, 3))
           }
         }
 
         "propagates results" in {
-          val f = mock[Seq[Int] => Future[Seq[Int]]]
+          val m = mock[Any => Future[Seq[Int]]]
+          val f = mock[scala.collection.Seq[Int] => Future[Seq[Int]]]
+          when(f.compose(any())).thenReturn(m)
+
           val batcher = Future.batched(3)(f)
 
-          Time.withCurrentTimeFrozen { control =>
-            when(f(Seq(1,2,3))) thenReturn(Future.value(result))
+          Time.withCurrentTimeFrozen { _ =>
+            when(m(Iterable(1, 2, 3))).thenReturn(Future.value(result))
             val res1 = batcher(1)
-            assert(res1.isDefined === false)
+            assert(!res1.isDefined)
             val res2 = batcher(2)
-            assert(res2.isDefined === false)
+            assert(!res2.isDefined)
             val res3 = batcher(3)
-            assert(res1.isDefined === true)
-            assert(res2.isDefined === true)
-            assert(res3.isDefined === true)
+            assert(res1.isDefined)
+            assert(res2.isDefined)
+            assert(res3.isDefined)
 
-            assert(Await.result(res1) === 4)
-            assert(Await.result(res2) === 5)
-            assert(Await.result(res3) === 6)
+            assert(await(res1) == 4)
+            assert(await(res2) == 5)
+            assert(await(res3) == 6)
 
-            verify(f).apply(Seq(1,2,3))
+            verify(m).apply(Iterable(1, 2, 3))
           }
         }
 
         "not block other batches" in {
-          val f = mock[Seq[Int] => Future[Seq[Int]]]
+          val m = mock[Any => Future[Seq[Int]]]
+          val f = mock[scala.collection.Seq[Int] => Future[Seq[Int]]]
+          when(f.compose(any())).thenReturn(m)
+
           val batcher = Future.batched(3)(f)
 
-          Time.withCurrentTimeFrozen { control =>
+          Time.withCurrentTimeFrozen { _ =>
             val blocker = new Promise[Unit]
             val thread = new Thread {
-              override def run() {
-                when(f(result)) thenReturn(Future.value(Seq(7,8,9)))
+              override def run(): Unit = {
+                when(m(result)).thenReturn(Future.value(Seq(7, 8, 9)))
                 batcher(4)
                 batcher(5)
                 batcher(6)
-                verify(f).apply(result)
+                verify(m).apply(result)
                 blocker.setValue(())
               }
             }
 
-            when(f(Seq(1,2,3))) thenAnswer {
+            when(m(Seq(1, 2, 3))).thenAnswer {
               new Answer[Future[Seq[Int]]] {
-                def answer(invocation: InvocationOnMock) = {
+                def answer(invocation: InvocationOnMock): Future[Seq[Int]] = {
                   thread.start()
-                  Await.result(blocker)
+                  await(blocker)
                   Future.value(result)
                 }
               }
@@ -427,17 +494,20 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
             batcher(1)
             batcher(2)
             batcher(3)
-            verify(f).apply(Seq(1,2,3))
+            verify(m).apply(Iterable(1, 2, 3))
           }
         }
 
         "swallow exceptions" in {
-          val f = mock[Seq[Int] => Future[Seq[Int]]]
+          val m = mock[Any => Future[Seq[Int]]]
+          val f = mock[scala.collection.Seq[Int] => Future[Seq[Int]]]
+          when(f.compose(any())).thenReturn(m)
+
           val batcher = Future.batched(3)(f)
 
-          when(f(Seq(1, 2, 3))) thenAnswer {
+          when(m(Iterable(1, 2, 3))).thenAnswer {
             new Answer[Unit] {
-              def answer(invocation: InvocationOnMock) = {
+              def answer(invocation: InvocationOnMock): Unit = {
                 throw new Exception
               }
             }
@@ -456,66 +526,116 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
           val e = new Exception
           i.raise(e)
           p.setDone()
-          assert(p.poll === Some(Return(())))
-          assert(i.poll === Some(Throw(e)))
+          assert(p.poll.contains(Return(())))
+          assert(i.poll.contains(Throw(e)))
         }
 
         "respect the underlying future" in {
           val p = Promise[Unit]()
           val i = p.interruptible()
           p.setDone()
-          assert(p.poll === Some(Return(())))
-          assert(i.poll === Some(Return(())))
+          assert(p.poll.contains(Return(())))
+          assert(i.poll.contains(Return(())))
         }
 
         "do nothing for const" in {
           val f = const.value(())
           val i = f.interruptible()
           i.raise(new Exception())
-          assert(f.poll === Some(Return(())))
-          assert(i.poll === Some(Return(())))
+          assert(f.poll.contains(Return(())))
+          assert(i.poll.contains(Return(())))
+        }
+      }
+
+      "traverseSequentially" should {
+        class TraverseTestSpy() {
+          var goWasCalled = false
+          var promise: Promise[Int] = Promise[Int]()
+          val go: () => Promise[Int] = () => {
+            goWasCalled = true
+            promise
+          }
+        }
+
+        "execute futures in order" in {
+          val first = new TraverseTestSpy()
+          val second = new TraverseTestSpy()
+          val events = Seq(first.go, second.go)
+
+          val results = Future.traverseSequentially(events)(f => f())
+
+          // At this point, none of the promises
+          // have been fufilled, so only the first function
+          // should have been called
+          assert(first.goWasCalled)
+          assert(!second.goWasCalled)
+
+          // once the first promise completes, the next
+          // function in the sequence should be executed
+          first.promise.setValue(1)
+          assert(second.goWasCalled)
+
+          // finally, the second promise is fufilled so
+          // we can Await on and check the results
+          second.promise.setValue(2)
+          assert(await(results) == Seq(1, 2))
+        }
+
+        "return with exception when the first future throws" in {
+          val first = new TraverseTestSpy()
+          val second = new TraverseTestSpy()
+          val events = Seq(first.go, second.go)
+          val results = Future.traverseSequentially(events)(f => f())
+
+          first.promise.setException(new Exception)
+
+          intercept[Exception] { await(results) }
+
+          // Since first returned an exception, second should
+          // never have been called
+          assert(!second.goWasCalled)
         }
       }
 
       "collect" should {
         trait CollectHelper {
           val p0, p1 = new HandledPromise[Int]
-          val f = Future.collect(Seq(p0, p1))
-          assert(f.isDefined === false)
+          val f: Future[Seq[Int]] = Future.collect(Seq(p0, p1))
+          assert(!f.isDefined)
         }
 
         "only return when both futures complete" in {
           new CollectHelper {
             p0() = Return(1)
-            assert(f.isDefined === false)
+            assert(!f.isDefined)
             p1() = Return(2)
-            assert(f.isDefined === true)
-            assert(Await.result(f) === Seq(1, 2))
+            assert(f.isDefined)
+            assert(await(f) == Seq(1, 2))
           }
         }
 
         "return with exception if the first future throws" in {
           new CollectHelper {
             p0() = Throw(new Exception)
-            intercept[Exception] { Await.result(f) }
+            intercept[Exception] { await(f) }
           }
         }
 
         "return with exception if the second future throws" in {
           new CollectHelper {
             p0() = Return(1)
-            assert(f.isDefined === false)
+            assert(!f.isDefined)
             p1() = Throw(new Exception)
-            intercept[Exception] { Await.result(f) }
+            intercept[Exception] { await(f) }
           }
         }
 
         "propagate interrupts" in {
           new CollectHelper {
             val ps = Seq(p0, p1)
-            assert(ps.count(_.handled.isDefined) === 0)
+            assert(ps.count(_.handled.isDefined) == 0)
             f.raise(new Exception)
-            assert(ps.count(_.handled.isDefined) === 2)
+            assert(ps.count(_.handled.isDefined) == 2)
           }
         }
 
@@ -525,12 +645,12 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
             "2" -> Future.value("2")
           )
 
-          assert(Await.result(Future.collect(map)) === Map("1" -> "1", "2" -> "2"))
+          assert(await(Future.collect(map)) == Map("1" -> "1", "2" -> "2"))
         }
 
         "work correctly if the given map is empty" in {
           val map = Map.empty[String, Future[String]]
-          assert(Await.result(Future.collect(map)).isEmpty)
+          assert(await(Future.collect(map)).isEmpty)
         }
 
         "return future exception if one of the map values is future exception" in {
@@ -540,7 +660,7 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
           )
 
           intercept[Exception] {
-            Await.result(Future.collect(map))
+            await(Future.collect(map))
           }
         }
       }
@@ -549,7 +669,7 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
 
         trait CollectToTryHelper {
           val p0, p1 = new HandledPromise[Int]
-          val f = Future.collectToTry(Seq(p0, p1))
+          val f: Future[Seq[Try[Int]]] = Future.collectToTry(Seq(p0, p1))
           assert(!f.isDefined)
         }
 
@@ -559,7 +679,7 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
             assert(!f.isDefined)
             p1() = Return(2)
             assert(f.isDefined)
-            assert(Await.result(f) === Seq(Return(1), Return(2)))
+            assert(await(f) == Seq(Return(1), Return(2)))
           }
         }
 
@@ -576,16 +696,16 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
             p0() = Return(1)
             assert(!f.isDefined)
             p1() = Throw(ex)
-            assert(Await.result(f) === Seq(Return(1), Throw(ex)))
+            assert(await(f) == Seq(Return(1), Throw(ex)))
           }
         }
 
         "propagate interrupts" in {
           new CollectToTryHelper {
             val ps = Seq(p0, p1)
-            assert(ps.count(_.handled.isDefined) === 0)
+            assert(ps.count(_.handled.isDefined) == 0)
             f.raise(new Exception)
-            assert(ps.count(_.handled.isDefined) === 2)
+            assert(ps.count(_.handled.isDefined) == 2)
           }
         }
       }
@@ -597,38 +717,38 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
         var ran = 0
         local() = 1010
 
-        f ensure {
-          assert(local() === Some(1010))
+        f.ensure {
+          assert(local().contains(1010))
           local() = 1212
-          f ensure {
-            assert(local() === Some(1212))
+          f.ensure {
+            assert(local().contains(1212))
             local() = 1313
             ran += 1
           }
-          assert(local() === Some(1212))
+          assert(local().contains(1212))
           ran += 1
         }
 
-        assert(local() === Some(1010))
-        assert(ran === 2)
+        assert(local().contains(1010))
+        assert(ran == 2)
       }
 
       "delay execution" in {
         val f = const.value(111)
 
         var count = 0
-        f onSuccess { _ =>
-          assert(count === 0)
-          f ensure {
-            assert(count === 1)
+        f.onSuccess { _ =>
+          assert(count == 0)
+          f.ensure {
+            assert(count == 1)
             count += 1
           }
 
-          assert(count === 0)
+          assert(count == 0)
           count += 1
         }
 
-        assert(count === 2)
+        assert(count == 2)
       }
 
       "are monitored" in {
@@ -636,27 +756,27 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
         val exc = new Exception("a raw exception")
 
         val f = Future.monitored {
-          inner ensure { throw exc }
+          inner.ensure { throw exc }
         }
 
-        assert(f.poll === Some(Throw(exc)))
+        assert(f.poll.contains(Throw(exc)))
       }
     }
 
-    "Future (%s)".format(name) should {
+    s"Future ($name)" should {
       "select" which {
         trait SelectHelper {
           var nhandled = 0
           val p0, p1 = new HandledPromise[Int]
-          val f = p0 select p1
-          assert(f.isDefined === false)
+          val f: Future[Int] = p0.select(p1)
+          assert(!f.isDefined)
         }
 
         "select the first [result] to complete" in {
           new SelectHelper {
             p0() = Return(1)
             p1() = Return(2)
-            assert(Await.result(f) === 1)
+            assert(await(f) == 1)
           }
         }
 
@@ -664,62 +784,72 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
           new SelectHelper {
             p0() = Throw(new Exception)
             p1() = Return(2)
-            intercept[Exception] { Await.result(f) }
+            intercept[Exception] { await(f) }
           }
         }
 
         "propagate interrupts" in {
           new SelectHelper {
             val ps = Seq(p0, p1)
-            assert((ps exists (_.handled.isDefined)) === false)
+            assert(!ps.exists(_.handled.isDefined))
             f.raise(new Exception)
-            assert((ps forall (_.handled.isDefined)) === true)
+            assert(ps.forall(_.handled.isDefined))
           }
         }
       }
 
-      def testJoin(label: String, joiner: ((Future[Int], Future[Int]) => Future[(Int, Int)])) {
-        "join(%s)".format(label) should {
+      def testJoin(
+        label: String,
+        joiner: ((Future[Int], Future[Int]) => Future[(Int, Int)])
+      ): Unit = {
+        s"join($label)" should {
           trait JoinHelper {
             val p0 = new HandledPromise[Int]
             val p1 = new HandledPromise[Int]
             val f = joiner(p0, p1)
-            assert(f.isDefined === false)
+            assert(!f.isDefined)
           }
 
-          "only return when both futures complete" in {
+          for {
+            left <- Seq(Ret(1), Thr(new Exception), Nvr)
+            right <- Seq(Ret(2), Thr(new Exception), Nvr)
+            leftFirst <- Seq(true, false)
+          } {
             new JoinHelper {
-              p0() = Return(1)
-              assert(f.isDefined === false)
-              p1() = Return(2)
-              assert(Await.result(f) === (1, 2))
-            }
-          }
-
-          "return with exception if the first future throws" in {
-            new JoinHelper {
-              p0() = Throw(new Exception)
-              intercept[Exception] { Await.result(f) }
-            }
-          }
-
-          "return with exception if the second future throws" in {
-            new JoinHelper {
-              p0() = Return(1)
-              assert(f.isDefined === false)
-              p1() = Throw(new Exception)
-              intercept[Exception] { Await.result(f) }
+              if (leftFirst) {
+                satisfy(p0, left)
+                satisfy(p1, right)
+              } else {
+                satisfy(p1, right)
+                satisfy(p0, left)
+              }
+              (left, right) match {
+                // Two Throws are special because leftFirst determines the
+                // exception (e0 or e1). Otherwise, every other case with a
+                // Throw will result in just one exception.
+                case (Thr(e0), Thr(e1)) =>
+                  val actual = intercept[Exception] { await(f) }
+                  assert(actual == (if (leftFirst) e0 else e1), explain(left, right, leftFirst))
+                case (_, Thr(exn)) =>
+                  val actual = intercept[Exception] { await(f) }
+                  assert(actual == exn, explain(left, right, leftFirst))
+                case (Thr(exn), _) =>
+                  val actual = intercept[Exception] { await(f) }
+                  assert(actual == exn, explain(left, right, leftFirst))
+                case (Nvr, Ret(_)) | (Ret(_), Nvr) | (Nvr, Nvr) => assert(!f.isDefined)
+                case (Ret(a), Ret(b)) => assert(await(f) == (a, b), explain(left, right, leftFirst))
+              }
             }
           }
 
           "propagate interrupts" in {
             new JoinHelper {
-              assert(p0.handled === None)
-              assert(p1.handled === None)
+              assert(p0.handled.isEmpty)
+              assert(p1.handled.isEmpty)
               val exc = new Exception
               f.raise(exc)
-              assert(p0.handled === Some(exc))
-              assert(p1.handled === Some(exc))
+              assert(p0.handled.contains(exc))
+              assert(p1.handled.contains(exc))
             }
           }
         }
@@ -732,11 +862,11 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
         "return the same thing as our Future when initialized" which {
           val f = const.value(1)
           val jf = f.toJavaFuture
-          assert(Await.result(f) === jf.get())
+          assert(await(f) == jf.get())
           "must both be done" in {
-            assert(f.isDefined === true)
-            assert(jf.isDone === true)
-            assert(jf.isCancelled === false)
+            assert(f.isDefined)
+            assert(jf.isDone)
+            assert(!jf.isCancelled)
           }
         }
 
@@ -744,11 +874,11 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
           val f = new Promise[Int]
           val jf = f.toJavaFuture
           f.setValue(1)
-          assert(Await.result(f) === jf.get())
+          assert(await(f) == jf.get())
           "must both be done" in {
-            assert(f.isDefined === true)
-            assert(jf.isDone === true)
-            assert(jf.isCancelled === false)
+            assert(f.isDefined)
+            assert(jf.isDone)
+            assert(!jf.isCancelled)
           }
         }
 
@@ -758,16 +888,16 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
           val e = new RuntimeException()
           f.setException(e)
           val actual = intercept[RuntimeException] { jf.get() }
-          assert(actual === e)
+          assert(actual == e)
         }
 
         "interrupt Future when cancelled" in {
           val f = new HandledPromise[Int]
           val jf = f.toJavaFuture
-          assert(f.handled === None)
+          assert(f.handled.isEmpty)
           jf.cancel(true)
           assert(f.handled match {
-            case Some(e: java.util.concurrent.CancellationException) => true
+            case Some(_: java.util.concurrent.CancellationException) => true
             case _ => false
           })
         }
@@ -785,7 +915,7 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
               throw exc
               inner
             }
-            assert(f.poll === Some(Throw(exc)))
+            assert(f.poll.contains(Throw(exc)))
           }
         }
 
@@ -793,103 +923,92 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
           new MonitoredHelper {
             val inner1 = new Promise[Int]
             var ran = false
-            val f = Future.monitored {
-              inner1 ensure {
-                throw exc
-              } ensure {
-                // Note that these are sequenced so that interrupts
-                // will be delivered before inner's handler is cleared.
-                ran = true
-                try {
-                  inner.update(Return(1))
-                } catch {
-                  case e: Throwable => assert(true === false)
+            val f: Future[Int] = Future.monitored {
+              inner1
+                .ensure {
+                  // Note that these are sequenced so that interrupts
+                  // will be delivered before inner's handler is cleared.
+                  ran = true
+                  try {
+                    inner.update(Return(1))
+                  } catch {
+                    case _: Throwable => fail()
+                  }
                 }
-              }
+                .ensure {
+                  throw exc
+                }
               inner
             }
-            assert(ran === false)
-            assert(f.poll === None)
-            assert(inner.handled === None)
+            assert(!ran)
+            assert(f.poll.isEmpty)
+            assert(inner.handled.isEmpty)
             inner1.update(Return(1))
-            assert(ran === true)
-            assert(inner.isDefined === true)
-            assert(f.poll === Some(Throw(exc)))
+            assert(ran)
+            assert(inner.isDefined)
+            assert(f.poll.contains(Throw(exc)))
 
-            assert(inner.handled === Some(exc))
+            assert(inner.handled.contains(exc))
           }
         }
 
         "link" in {
           new MonitoredHelper {
-            val f = Future.monitored { inner }
-            assert(inner.handled === None)
+            val f: Future[Int] = Future.monitored { inner }
+            assert(inner.handled.isEmpty)
             f.raise(exc)
-            assert(inner.handled === Some(exc))
+            assert(inner.handled.contains(exc))
           }
         }
 
-        "doesn't leak the underlying promise after completion" in {
-          new MonitoredHelper {
-            val inner1 = new Promise[String]
-            val inner2 = new Promise[String]
-            val f = Future.monitored { inner2.ensure(()); inner1 }
-            val s = "."*1024
-            val sSize = ObjectSizeCalculator.getObjectSize(s)
-            inner1.setValue("."*1024)
-            val inner2Size = ObjectSizeCalculator.getObjectSize(inner2)
-            assert(inner2Size < sSize)
+        // we only know this works as expected when running with JDK 8
+        if (System.getProperty("java.version").startsWith("1.8"))
+          "doesn't leak the underlying promise after completion" in {
+            new MonitoredHelper {
+              val inner1 = new Promise[String]
+              val inner2 = new Promise[String]
+              val f: Future[String] = Future.monitored { inner2.ensure(()); inner1 }
+              val s: String = "." * 1024
+              val sSize: Long = ObjectSizeCalculator.getObjectSize(s)
+              inner1.setValue(s)
+              val inner2Size: Long = ObjectSizeCalculator.getObjectSize(inner2)
+              assert(inner2Size < sSize)
+            }
           }
-        }
-      }
-
-      "get(deprecated)" in {
-        val e = new Exception
-        val v = 123
-        assert(Future.exception[Int](e).get(0.seconds) === Throw(e))
-        assert(Future.value(v).get(0.seconds) === Return(v))
-
-        // Including fatal ones:
-        val e2 = new java.lang.IllegalAccessError
-        assert(Future.exception[Int](e2).get(0.seconds)  === Throw(e2))
-
-        implicit val timer = new JavaTimer
-        val p = new Promise[Int]
-        val r = p.get(50.milliseconds)
-        intercept[TimeoutException]{ r() }
-        timer.stop()
       }
     }
 
-    "Promise (%s)".format(name) should {
+    s"Promise ($name)" should {
       "apply" which {
         "when we're inside of a respond block (without deadlocking)" in {
           val f = Future(1)
           var didRun = false
-          f foreach { _ =>
+          f.foreach { _ =>
             f mustProduce Return(1)
             didRun = true
           }
-          assert(didRun === true)
+          assert(didRun)
         }
       }
 
       "map" which {
         "when it's all chill" in {
-          val f = Future(1) map { x => x + 1 }
-          assert(Await.result(f) === 2)
+          val f = Future(1).map { x =>
+            x + 1
+          }
+          assert(await(f) == 2)
         }
 
         "when there's a problem in the passed in function" in {
           val e = new Exception
-          val f = Future(1) map { x =>
+          val f = Future(1).map { x =>
             throw e
             x + 1
           }
           val actual = intercept[Exception] {
-            Await.result(f)
+            await(f)
           }
-          assert(actual === e)
+          assert(actual == e)
         }
       }
 
@@ -897,40 +1016,49 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
         val e = new Exception("rdrr")
 
         "values" in {
-          const.value(1).transform {
-            case Return(v) => const.value(v + 1)
-            case Throw(t) => const.value(0)
-          } mustProduce(Return(2))
+          const
+            .value(1)
+            .transform {
+              case Return(v) => const.value(v + 1)
+              case Throw(_) => const.value(0)
+            }
+            .mustProduce(Return(2))
         }
 
         "exceptions" in {
-          const.exception(e).transform {
-            case Return(_) => const.value(1)
-            case Throw(t) => const.value(0)
-          } mustProduce(Return(0))
+          const
+            .exception(e)
+            .transform {
+              case Return(_) => const.value(1)
+              case Throw(_) => const.value(0)
+            }
+            .mustProduce(Return(0))
         }
 
         "exceptions thrown during transformation" in {
-          const.value(1).transform {
-            case Return(v) => const.value(throw e)
-            case Throw(t) => const.value(0)
-          } mustProduce(Throw(e))
+          const
+            .value(1)
+            .transform {
+              case Return(_) => const.value(throw e)
+              case Throw(_) => const.value(0)
+            }
+            .mustProduce(Throw(e))
         }
 
         "non local returns executed during transformation" in {
           def ret(): String = {
             val f = const.value(1).transform {
-              case Return(v) =>
+              case Return(_) =>
                 val fn = { () =>
                   return "OK"
                 }
                 fn()
                 Future.value(ret())
-              case Throw(t) => const.value(0)
+              case Throw(_) => const.value(0)
             }
             assert(f.poll.isDefined)
             val e = intercept[FutureNonLocalReturnControl] {
-              f.poll.get.get
+              f.poll.get.get()
             }
 
             val g = e.getCause match {
@@ -938,7 +1066,7 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
               case _ =>
                 fail()
             }
-            assert(g.value === "OK")
+            assert(g.value == "OK")
             "bleh"
           }
           ret()
@@ -949,27 +1077,29 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
 
           val actual = intercept[FatalException] {
             const.value(1).transform {
-              case Return(v) => const.value(throw e)
-              case Throw(t) => const.value(0)
+              case Return(_) => const.value(throw e)
+              case Throw(_) => const.value(0)
             }
           }
-          assert(actual === e)
+          assert(actual == e)
         }
 
         "monitors fatal exceptions" in {
           val m = new HandledMonitor()
           val exc = new FatalException()
 
-          assert(m.handled === null)
+          assert(m.handled == null)
 
           val actual = intercept[FatalException] {
             Monitor.using(m) {
-              const.value(1) transform { case _ => throw exc }
+              const.value(1).transform { _ =>
+                throw exc
+              }
             }
           }
 
-          assert(actual === exc)
-          assert(m.handled === exc)
+          assert(actual == exc)
+          assert(m.handled == exc)
         }
       }
 
@@ -977,66 +1107,83 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
         val e = new Exception("rdrr")
 
         "flatMap" in {
-          const.value(1).transformedBy(new FutureTransformer[Int, Int] {
-            override def flatMap(value: Int) = const.value(value + 1)
-            override def rescue(t: Throwable) = const.value(0)
-          }) mustProduce(Return(2))
+          const
+            .value(1)
+            .transformedBy(new FutureTransformer[Int, Int] {
+              override def flatMap(value: Int): Future[Int] = const.value(value + 1)
+              override def rescue(t: Throwable): Future[Int] = const.value(0)
+            })
+            .mustProduce(Return(2))
         }
 
         "rescue" in {
-          const.exception(e).transformedBy(new FutureTransformer[Int, Int] {
-            override def flatMap(value: Int) = const.value(value + 1)
-            override def rescue(t: Throwable) = const.value(0)
-          }) mustProduce(Return(0))
+          const
+            .exception(e)
+            .transformedBy(new FutureTransformer[Int, Int] {
+              override def flatMap(value: Int): Future[Int] = const.value(value + 1)
+              override def rescue(t: Throwable): Future[Int] = const.value(0)
+            })
+            .mustProduce(Return(0))
         }
 
         "exceptions thrown during transformation" in {
-          const.value(1).transformedBy(new FutureTransformer[Int, Int] {
-            override def flatMap(value: Int) = throw e
-            override def rescue(t: Throwable) = const.value(0)
-          }) mustProduce(Throw(e))
+          const
+            .value(1)
+            .transformedBy(new FutureTransformer[Int, Int] {
+              override def flatMap(value: Int): Future[Int] = throw e
+              override def rescue(t: Throwable): Future[Int] = const.value(0)
+            })
+            .mustProduce(Throw(e))
         }
 
         "map" in {
-          const.value(1).transformedBy(new FutureTransformer[Int, Int] {
-            override def map(value: Int) = value + 1
-            override def handle(t: Throwable) = 0
-          }) mustProduce(Return(2))
+          const
+            .value(1)
+            .transformedBy(new FutureTransformer[Int, Int] {
+              override def map(value: Int): Int = value + 1
+              override def handle(t: Throwable): Int = 0
+            })
+            .mustProduce(Return(2))
         }
 
         "handle" in {
-          const.exception(e).transformedBy(new FutureTransformer[Int, Int] {
-            override def map(value: Int) = value + 1
-            override def handle(t: Throwable) = 0
-          }) mustProduce(Return(0))
+          const
+            .exception(e)
+            .transformedBy(new FutureTransformer[Int, Int] {
+              override def map(value: Int): Int = value + 1
+              override def handle(t: Throwable): Int = 0
+            })
+            .mustProduce(Return(0))
         }
       }
 
       def testSequence(
-          which: String,
-          seqop: (Future[Unit], () => Future[Unit]) => Future[Unit]) {
+        which: String,
+        seqop: (Future[Unit], () => Future[Unit]) => Future[Unit]
+      ): Unit = {
         which when {
           "successes" should {
             "interruption of the produced future" which {
               "before the antecedent Future completes, propagates back to the antecedent" in {
                 val f1, f2 = new HandledPromise[Unit]
-                val f = seqop(f1, () => f2)
-                assert(f1.handled === None)
-                assert(f2.handled === None)
-                f.raise(new Exception)
+                val f3 = seqop(f1, () => f2)
+                assert(f1.handled.isEmpty)
+                assert(f2.handled.isEmpty)
+                f3.raise(new Exception)
                 assert(f1.handled.isDefined)
+                assert(f2.handled.isEmpty)
                 f1() = Return.Unit
                 assert(f2.handled.isDefined)
               }
 
               "after the antecedent Future completes, does not propagate back to the antecedent" in {
                 val f1, f2 = new HandledPromise[Unit]
-                val f = seqop(f1, () => f2)
-                assert(f1.handled === None)
-                assert(f2.handled === None)
+                val f3 = seqop(f1, () => f2)
+                assert(f1.handled.isEmpty)
+                assert(f2.handled.isEmpty)
                 f1() = Return.Unit
-                f.raise(new Exception)
-                assert(f1.handled === None)
+                f3.raise(new Exception)
+                assert(f1.handled.isEmpty)
                 assert(f2.handled.isDefined)
               }
 
@@ -1048,13 +1195,13 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
                 f3.setInterruptHandler {
                   case `exc` => didInterrupt = true
                 }
-                val f = seqop(f1, () => seqop(f2, () => f3))
-                f.raise(exc)
-                assert(didInterrupt === false)
+                val f4 = seqop(f1, () => seqop(f2, () => f3))
+                f4.raise(exc)
+                assert(!didInterrupt)
                 f1.setDone()
-                assert(didInterrupt === false)
+                assert(!didInterrupt)
                 f2.setDone()
-                assert(didInterrupt === true)
+                assert(didInterrupt)
               }
             }
           }
@@ -1064,8 +1211,8 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
             val g = seqop(Future[Unit](throw e), () => Future.Done)
 
             "apply" in {
-              val actual = intercept[Exception] { Await.result(g) }
-              assert(actual === e)
+              val actual = intercept[Exception] { await(g) }
+              assert(actual == e)
             }
 
             "respond" in {
@@ -1075,24 +1222,32 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
             "when there is an exception in the passed in function" in {
               val e = new Exception
               val f = seqop(Future.Done, () => throw e)
-              val actual = intercept[Exception] { Await.result(f) }
-              assert(actual === e)
+              val actual = intercept[Exception] { await(f) }
+              assert(actual == e)
             }
           }
         }
       }
 
-      testSequence("flatMap", (a, next) => a flatMap { _ => next() })
-      testSequence("before", (a, next) => a before next())
+      testSequence(
+        "flatMap",
+        (a, next) =>
+          a.flatMap { _ =>
+            next()
+        }
+      )
+      testSequence("before", (a, next) => a.before { next() })
 
       "flatMap (values)" should {
-        val f = Future(1) flatMap { x => Future(x + 1) }
-
-        "apply" which {
-          assert(Await.result(f) === 2)
+        val f = Future(1).flatMap { x =>
+          Future(x + 1)
         }
 
-        "respond" which {
+        "apply" in {
+          assert(await(f) == 2)
+        }
+
+        "respond" in {
           f mustProduce Return(2)
         }
       }
@@ -1119,18 +1274,18 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
           val f1 = new HandledPromise[Future[Int]]
           val f2 = new HandledPromise[Int]
           val f = f1.flatten
-          assert(f1.handled === None)
-          assert(f2.handled === None)
+          assert(f1.handled.isEmpty)
+          assert(f2.handled.isEmpty)
           f.raise(new Exception)
           f1.handled match {
             case Some(_) =>
-            case None => assert(false === true)
+            case None => fail()
           }
-          assert(f2.handled === None)
+          assert(f2.handled.isEmpty)
           f1() = Return(f2)
-          f2.handled  match {
+          f2.handled match {
             case Some(_) =>
-            case None => assert(false === true)
+            case None => fail()
           }
         }
       }
@@ -1139,10 +1294,10 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
         val e = new Exception
 
         "successes" which {
-          val f = Future(1) rescue { case e => Future(2) }
+          val f = Future(1).rescue { case _ => Future(2) }
 
           "apply" in {
-            assert(Await.result(f) === 1)
+            assert(await(f) == 1)
           }
 
           "respond" in {
@@ -1151,10 +1306,10 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
         }
 
         "failures" which {
-          val g = Future[Int](throw e) rescue { case e => Future(2) }
+          val g = Future[Int](throw e).rescue { case _ => Future(2) }
 
           "apply" in {
-            assert(Await.result(g) === 2)
+            assert(await(g) == 2)
           }
 
           "respond" in {
@@ -1162,43 +1317,43 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
           }
 
           "when the error handler errors" in {
-            val g = Future[Int](throw e) rescue { case e => throw e; Future(2) }
-            val actual = intercept[Exception] { Await.result(g) }
-            assert(actual === e)
+            val g = Future[Int](throw e).rescue { case x => throw x; Future(2) }
+            val actual = intercept[Exception] { await(g) }
+            assert(actual == e)
           }
         }
 
         "interruption of the produced future" which {
           "before the antecedent Future completes, propagates back to the antecedent" in {
             val f1, f2 = new HandledPromise[Int]
-            val f = f1 rescue { case _ => f2 }
-            assert(f1.handled === None)
-            assert(f2.handled === None)
+            val f = f1.rescue { case _ => f2 }
+            assert(f1.handled.isEmpty)
+            assert(f2.handled.isEmpty)
             f.raise(new Exception)
-            f1.handled  match {
-            case Some(_) =>
-            case None => assert(false === true)
-          }
-            assert(f2.handled === None)
+            f1.handled match {
+              case Some(_) =>
+              case None => fail()
+            }
+            assert(f2.handled.isEmpty)
             f1() = Throw(new Exception)
-            f2.handled  match {
-            case Some(_) =>
-            case None => assert(false === true)
-          }
+            f2.handled match {
+              case Some(_) =>
+              case None => fail()
+            }
           }
 
           "after the antecedent Future completes, does not propagate back to the antecedent" in {
             val f1, f2 = new HandledPromise[Int]
-            val f = f1 rescue { case _ => f2 }
-            assert(f1.handled === None)
-            assert(f2.handled === None)
+            val f = f1.rescue { case _ => f2 }
+            assert(f1.handled.isEmpty)
+            assert(f2.handled.isEmpty)
             f1() = Throw(new Exception)
             f.raise(new Exception)
-            assert(f1.handled === None)
-            f2.handled  match {
-            case Some(_) =>
-            case None => assert(false === true)
-          }
+            assert(f1.handled.isEmpty)
+            f2.handled match {
+              case Some(_) =>
+              case None => fail()
+            }
           }
         }
       }
@@ -1206,82 +1361,86 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
       "foreach" in {
         var wasCalledWith: Option[Int] = None
         val f = Future(1)
-        f foreach { i =>
+        f.foreach { i =>
           wasCalledWith = Some(i)
         }
-        assert(wasCalledWith === Some(1))
+        assert(wasCalledWith.contains(1))
       }
 
       "respond" should {
         "when the result has arrived" in {
           var wasCalledWith: Option[Int] = None
           val f = Future(1)
-          f respond {
+          f.respond {
             case Return(i) => wasCalledWith = Some(i)
             case Throw(e) => fail(e.toString)
           }
-          assert(wasCalledWith === Some(1))
+          assert(wasCalledWith.contains(1))
         }
 
         "when the result has not yet arrived it buffers computations" in {
           var wasCalledWith: Option[Int] = None
           val f = new Promise[Int]
-          f foreach { i =>
+          f.foreach { i =>
             wasCalledWith = Some(i)
           }
-          assert(wasCalledWith === None)
-          f()= Return(1)
-          assert(wasCalledWith === Some(1))
+          assert(wasCalledWith.isEmpty)
+          f() = Return(1)
+          assert(wasCalledWith.contains(1))
         }
 
-        "runs callbacks just once and in order" in {
-          var i,j,k,h = 0
+        "runs callbacks just once and in order (lifo)" in {
+          var i, j, k, h = 0
           val p = new Promise[Int]
-          p ensure {
-            i = i+j+k+h+1
-          } ensure {
-            j = i+j+k+h+1
-          } ensure {
-            k = i+j+k+h+1
-          } ensure {
-            h = i+j+k+h+1
-          }
 
-          assert(i === 0)
-          assert(j === 0)
-          assert(k === 0)
-          assert(h === 0)
+          p.ensure {
+              i = i + j + k + h + 1
+            }
+            .ensure {
+              j = i + j + k + h + 1
+            }
+            .ensure {
+              k = i + j + k + h + 1
+            }
+            .ensure {
+              h = i + j + k + h + 1
+            }
+
+          assert(i == 0)
+          assert(j == 0)
+          assert(k == 0)
+          assert(h == 0)
 
           p.setValue(1)
-          assert(i === 1)
-          assert(j === 2)
-          assert(k === 4)
-          assert(h === 8)
+          assert(i == 8)
+          assert(j == 4)
+          assert(k == 2)
+          assert(h == 1)
         }
 
         "monitor exceptions" in {
           val m = new HandledMonitor()
           val exc = new Exception
 
-          assert(m.handled === null)
+          assert(m.handled == null)
 
           Monitor.using(m) {
-            const.value(1) ensure { throw exc }
+            const.value(1).ensure { throw exc }
           }
 
-          assert(m.handled === exc)
+          assert(m.handled == exc)
         }
       }
 
       "willEqual" in {
-        assert(Await.result(const.value(1) willEqual(const.value(1)), 1.second) === true)
+        assert(await(const.value(1).willEqual(const.value(1)), 1.second))
       }
 
       "Future() handles exceptions" in {
         val e = new Exception
         val f = Future[Int] { throw e }
-        val actual = intercept[Exception] { Await.result(f) }
-        assert(actual === e)
+        val actual = intercept[Exception] { await(f) }
+        assert(actual == e)
       }
 
       "propagate locals" in {
@@ -1291,9 +1450,9 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
 
         local() = 1010
 
-        val both = promise0 flatMap { _ =>
+        val both = promise0.flatMap { _ =>
           val local0 = local()
-          promise1 map { _ =>
+          promise1.map { _ =>
             val local1 = local()
             (local0, local1)
           }
@@ -1304,8 +1463,8 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
         local() = 321
         promise1() = Return.Unit
 
-        assert(both.isDefined === true)
-        assert(Await.result(both) === (Some(1010), Some(1010)))
+        assert(both.isDefined)
+        assert(await(both) == ((Some(1010), Some(1010))))
       }
 
       "propagate locals across threads" in {
@@ -1313,10 +1472,12 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
         val promise = new Promise[Option[Int]]
 
         local() = 123
-        val done = promise map { otherValue => (otherValue, local()) }
+        val done = promise.map { otherValue =>
+          (otherValue, local())
+        }
 
         val t = new Thread {
-          override def run() {
+          override def run(): Unit = {
             local() = 1010
             promise() = Return(local())
           }
@@ -1325,8 +1486,8 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
         t.run()
         t.join()
 
-        assert(done.isDefined === true)
-        assert(Await.result(done) === (Some(1010), Some(123)))
+        assert(done.isDefined)
+        assert(await(done) == ((Some(1010), Some(123))))
       }
 
       "poll" should {
@@ -1335,14 +1496,14 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
         }
         "when waiting" in {
           new PollHelper {
-            assert(p.poll === None)
+            assert(p.poll.isEmpty)
           }
         }
 
         "when succeeding" in {
           new PollHelper {
             p.setValue(1)
-            assert(p.poll === Some(Return(1)))
+            assert(p.poll.contains(Return(1)))
           }
         }
 
@@ -1350,112 +1511,117 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
           new PollHelper {
             val e = new Exception
             p.setException(e)
-            assert(p.poll === Some(Throw(e)))
+            assert(p.poll.contains(Throw(e)))
           }
         }
       }
 
-      "within" should {
-        "when we run out of time" in {
-          implicit val timer = new JavaTimer
-          val p = new HandledPromise[Int]
-          intercept[TimeoutException] { Await.result(p.within(50.milliseconds)) }
-          timer.stop()
-          assert(p.handled === None)
-        }
+      val uw = (p: Promise[Int], d: Duration, t: Timer) => {
+        p.within(d)(t)
+      }
 
-        "when everything is chill" in {
-          implicit val timer = new JavaTimer
-          val p = new Promise[Int]
-          p.setValue(1)
-          assert(Await.result(p.within(50.milliseconds)) === 1)
-          timer.stop()
-        }
+      val ub = (p: Promise[Int], d: Duration, t: Timer) => {
+        p.by(d.fromNow)(t)
+      }
 
-        "when timeout is forever" in {
-          // We manage to throw an exception inside
-          // the scala compiler if we use MockTimer
-          // here. Sigh.
-          implicit val timer = new Timer {
-            def schedule(when: Time)(f: => Unit): TimerTask =
-              throw new Exception("schedule called")
-            def schedule(when: Time, period: Duration)(f: => Unit): TimerTask =
-              throw new Exception("schedule called")
-            def stop() = ()
+      Seq(("within", uw), ("by", ub)).foreach {
+        case (label, use) =>
+          label should {
+            "when we run out of time" in {
+              implicit val timer: Timer = new JavaTimer
+              val p = new HandledPromise[Int]
+              intercept[TimeoutException] { await(use(p, 50.milliseconds, timer)) }
+              timer.stop()
+              assert(p.handled.isEmpty)
+            }
+
+            "when everything is chill" in {
+              implicit val timer: Timer = new JavaTimer
+              val p = new Promise[Int]
+              p.setValue(1)
+              assert(await(use(p, 50.milliseconds, timer)) == 1)
+              timer.stop()
+            }
+
+            "when timeout is forever" in {
+              // We manage to throw an exception inside
+              // the scala compiler if we use MockTimer
+              // here. Sigh.
+              implicit val timer: Timer = FailingTimer
+              val p = new Promise[Int]
+              assert(use(p, Duration.Top, timer) == p)
+            }
+
+            "when future already satisfied" in {
+              implicit val timer: Timer = new NullTimer
+              val p = new Promise[Int]
+              p.setValue(3)
+              assert(use(p, 1.minute, timer) == p)
+            }
+
+            "interruption" in Time.withCurrentTimeFrozen { _ =>
+              implicit val timer: Timer = new MockTimer
+              val p = new HandledPromise[Int]
+              val f = use(p, 50.milliseconds, timer)
+              assert(p.handled.isEmpty)
+              f.raise(new Exception)
+              p.handled match {
+                case Some(_) =>
+                case None => fail()
+              }
+            }
           }
-          val p = new Promise[Int]
-          assert(p.within(Duration.Top) === p)
-        }
-
-        "when future already satisfied" in {
-          implicit val timer = new NullTimer
-          val p = new Promise[Int]
-          p.setValue(3)
-          assert(p.within(1.minute) === p)
-        }
-
-        "interruption" in Time.withCurrentTimeFrozen { tc =>
-          implicit val timer = new MockTimer
-          val p = new HandledPromise[Int]
-          val f = p.within(50.milliseconds)
-          assert(p.handled === None)
-          f.raise(new Exception)
-          p.handled  match {
-            case Some(_) =>
-            case None => assert(false === true)
-          }
-        }
       }
 
       "raiseWithin" should {
         "when we run out of time" in {
-          implicit val timer = new JavaTimer
+          implicit val timer: Timer = new JavaTimer
           val p = new HandledPromise[Int]
           intercept[TimeoutException] {
-            Await.result(p.raiseWithin(50.milliseconds))
+            await(p.raiseWithin(50.milliseconds))
           }
           timer.stop()
-          p.handled  match {
+          p.handled match {
             case Some(_) =>
-            case None => assert(false === true)
+            case None => fail()
           }
         }
 
         "when we run out of time, throw our stuff" in {
-          implicit val timer = new JavaTimer
+          implicit val timer: Timer = new JavaTimer
           class SkyFallException extends Exception("let the skyfall")
           val skyFall = new SkyFallException
           val p = new HandledPromise[Int]
           intercept[SkyFallException] {
-            Await.result(p.raiseWithin(50.milliseconds, skyFall))
+            await(p.raiseWithin(50.milliseconds, skyFall))
           }
           timer.stop()
-          p.handled  match {
+          p.handled match {
             case Some(_) =>
-            case None => assert(false === true)
+            case None => fail()
           }
-          assert(p.handled === Some(skyFall))
+          assert(p.handled.contains(skyFall))
         }
 
         "when we are within timeout, but inner throws TimeoutException, we don't raise" in {
-          implicit val timer = new JavaTimer
+          implicit val timer: Timer = new JavaTimer
           class SkyFallException extends Exception("let the skyfall")
           val skyFall = new SkyFallException
           val p = new HandledPromise[Int]
           intercept[TimeoutException] {
-            Await.result(
+            await(
               p.within(20.milliseconds).raiseWithin(50.milliseconds, skyFall)
             )
           }
           timer.stop()
-          assert(p.handled === None)
+          assert(p.handled.isEmpty)
         }
 
         "when everything is chill" in {
-          implicit val timer = new JavaTimer
+          implicit val timer: Timer = new JavaTimer
           val p = new Promise[Int]
           p.setValue(1)
-          assert(Await.result(p.raiseWithin(50.milliseconds)) === 1)
+          assert(await(p.raiseWithin(50.milliseconds)) == 1)
           timer.stop()
         }
 
@@ -1463,33 +1629,27 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
           // We manage to throw an exception inside
           // the scala compiler if we use MockTimer
           // here. Sigh.
-          implicit val timer = new Timer {
-            def schedule(when: Time)(f: => Unit): TimerTask =
-              throw new Exception("schedule called")
-            def schedule(when: Time, period: Duration)(f: => Unit): TimerTask =
-              throw new Exception("schedule called")
-            def stop() = ()
-          }
+          implicit val timer: Timer = FailingTimer
           val p = new Promise[Int]
-          assert(p.raiseWithin(Duration.Top) === p)
+          assert(p.raiseWithin(Duration.Top) == p)
         }
 
         "when future already satisfied" in {
-          implicit val timer = new NullTimer
+          implicit val timer: Timer = new NullTimer
           val p = new Promise[Int]
           p.setValue(3)
-          assert(p.raiseWithin(1.minute) === p)
+          assert(p.raiseWithin(1.minute) == p)
         }
 
-        "interruption" in Time.withCurrentTimeFrozen { tc =>
-          implicit val timer = new MockTimer
+        "interruption" in Time.withCurrentTimeFrozen { _ =>
+          implicit val timer: Timer = new MockTimer
           val p = new HandledPromise[Int]
           val f = p.raiseWithin(50.milliseconds)
-          assert(p.handled === None)
+          assert(p.handled.isEmpty)
           f.raise(new Exception)
-          p.handled  match {
+          p.handled match {
             case Some(_) =>
-            case None => assert(false === true)
+            case None => fail()
           }
         }
       }
@@ -1499,7 +1659,7 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
           val p = new HandledPromise[Unit]
           val f = p.masked
           f.raise(new Exception())
-          assert(p.handled === None)
+          assert(p.handled.isEmpty)
         }
 
         "do conditional interruption" in {
@@ -1511,7 +1671,7 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
             case _: TimeoutException => true
           }
           f1.raise(new TimeoutException("bang!"))
-          assert(p.handled === None)
+          assert(p.handled.isEmpty)
           f2.raise(new Exception())
           assert(p.handled.isDefined)
         }
@@ -1519,14 +1679,14 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
 
       "liftToTry" should {
         "success" in {
-          val p = Future.value(3)
-          assert(Await.result(p.liftToTry) === Return(3))
+          val p = const(Return(3))
+          assert(await(p.liftToTry) == Return(3))
         }
 
         "failure" in {
           val ex = new Exception()
-          val p = Future.exception(ex)
-          assert(Await.result(p.liftToTry) === Throw(ex))
+          val p = const(Throw(ex))
+          assert(await(p.liftToTry) == Throw(ex))
         }
 
         "propagates interrupt" in {
@@ -1535,76 +1695,100 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
           assert(p.handled.isDefined)
         }
       }
+
+      "lowerFromTry" should {
+        "success" in {
+          val f = const(Return(Return(3)))
+          assert(await(f.lowerFromTry) == 3)
+        }
+
+        "failure" in {
+          val ex = new Exception()
+          val p = const(Return(Throw(ex)))
+          val ex1 = intercept[Exception] { await(p.lowerFromTry) }
+          assert(ex == ex1)
+        }
+
+        "propagates interrupt" in {
+          val p = new HandledPromise[Try[Unit]]
+          p.lowerFromTry.raise(new Exception())
+          assert(p.handled.isDefined)
+        }
+      }
     }
 
-    "FutureTask (%s)".format(name) should {
+    s"FutureTask ($name)" should {
       "return result" in {
         val task = new FutureTask("hello")
         task.run()
-        assert(Await.result(task) === "hello")
+        assert(await(task) == "hello")
       }
 
       "throw result" in {
         val task = new FutureTask[String](throw new IllegalStateException)
         task.run()
         intercept[IllegalStateException] {
-          Await.result(task)
+          await(task)
         }
       }
     }
   }
 
-  test("ConstFuture", new MkConst { def apply[A](r: Try[A]) = Future.const(r) })
-  test("Promise", new MkConst { def apply[A](r: Try[A]) = new Promise(r) })
+  test("ConstFuture", new MkConst {
+    def apply[A](r: Try[A]): Future[A] = Future.const(r)
+  })
+  test("Promise", new MkConst {
+    def apply[A](r: Try[A]): Future[A] = new Promise(r)
+  })
 
   "Future.apply" should {
     "fail on NLRC" in {
       def ok(): String = {
         val f = Future(return "OK")
         val t = intercept[FutureNonLocalReturnControl] {
-          f.poll.get.get
+          f.poll.get.get()
         }
         val nlrc = intercept[NonLocalReturnControl[String]] {
           throw t.getCause
         }
-        assert(nlrc.value === "OK")
+        assert(nlrc.value == "OK")
         "NOK"
       }
-      assert(ok() === "NOK")
+      assert(ok() == "NOK")
     }
   }
 
   "Future.None" should {
     "always be defined" in {
-      assert(Future.None.isDefined === true)
+      assert(Future.None.isDefined)
     }
     "but still None" in {
-      assert(Await.result(Future.None) === None)
+      assert(await(Future.None).isEmpty)
     }
   }
 
   "Future.True" should {
     "always be defined" in {
-      assert(Future.True.isDefined === true)
+      assert(Future.True.isDefined)
     }
     "but still True" in {
-      assert(Await.result(Future.True) === true)
+      assert(await(Future.True))
     }
   }
 
   "Future.False" should {
     "always be defined" in {
-      assert(Future.False.isDefined === true)
+      assert(Future.False.isDefined)
     }
     "but still False" in {
-      assert(Await.result(Future.False) === false)
+      assert(!await(Future.False))
     }
   }
 
   "Future.never" should {
     "must be undefined" in {
-      assert(Future.never.isDefined === false)
-      assert(Future.never.poll === None)
+      assert(!Future.never.isDefined)
+      assert(Future.never.poll.isEmpty)
     }
 
     "always time out" in {
@@ -1643,7 +1827,7 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
 
   "Future.sleep" should {
     "Satisfy after the given amount of time" in Time.withCurrentTimeFrozen { tc =>
-      implicit val timer = new MockTimer
+      implicit val timer: MockTimer = new MockTimer
 
       val f = Future.sleep(10.seconds)
       assert(!f.isDefined)
@@ -1653,14 +1837,14 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
       tc.advance(5.seconds)
       timer.tick()
       assert(f.isDefined)
-      Await.result(f)
+      await(f)
     }
 
     "Be interruptible" in {
-      implicit val timer = new MockTimer
+      implicit val timer: MockTimer = new MockTimer
 
-      // sleep forever and grab the task that's created
-      val f = Future.sleep(Duration.Top)(timer)
+      // sleep and grab the task that's created
+      val f = Future.sleep(1.second)(timer)
       val task = timer.tasks(0)
       // then raise a known exception
       val e = new Exception("expected")
@@ -1672,9 +1856,15 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
     }
 
     "Return Future.Done for durations <= 0" in {
-      implicit val timer = new MockTimer
+      implicit val timer: MockTimer = new MockTimer
       assert(Future.sleep(Duration.Zero) eq Future.Done)
       assert(Future.sleep((-10).seconds) eq Future.Done)
+      assert(timer.tasks.isEmpty)
+    }
+
+    "Return Future.never for Duration.Top" in {
+      implicit val timer: MockTimer = new MockTimer
+      assert(Future.sleep(Duration.Top) eq Future.never)
       assert(timer.tasks.isEmpty)
     }
   }
@@ -1683,53 +1873,55 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
     import Arbitrary.arbitrary
     val genLen = Gen.choose(1, 10)
 
-    "return the first result" which {
+    "return the first result" in {
       forAll(genLen, arbitrary[Boolean]) { (n, fail) =>
-        val ps = ((0 until n) map(_ => new Promise[Int])).toList
-        assert(ps.map(_.waitqLength).sum === 0)
+        val ps = List.fill(n)(new Promise[Int]())
+        assert(ps.map(_.waitqLength).sum == 0)
         val f = Future.select(ps)
         val i = Random.nextInt(ps.length)
         val e = new Exception("sad panda")
         val t = if (fail) Throw(e) else Return(i)
         ps(i).update(t)
         assert(f.isDefined)
-        val (ft, fps) = Await.result(f)
-        assert(ft === t)
-        assert(fps.toSet === (ps.toSet - ps(i)))
+        val (ft, fps) = await(f)
+        assert(ft == t)
+        assert(fps.toSet == (ps.toSet - ps(i)))
       }
     }
 
     "not accumulate listeners when losing or" in {
       val p = new Promise[Unit]
       val q = new Promise[Unit]
-      p or q
-      assert(p.waitqLength === 1)
+      p.or(q)
+      assert(p.waitqLength == 1)
       q.setDone()
-      assert(p.waitqLength === 0)
+      assert(p.waitqLength == 0)
     }
 
     "not accumulate listeners when losing select" in {
       val p = new Promise[Unit]
       val q = new Promise[Unit]
-      val f = Future.select(Seq(p, q))
-      assert(p.waitqLength === 1)
+      Future.select(Seq(p, q))
+      assert(p.waitqLength == 1)
       q.setDone()
-      assert(p.waitqLength === 0)
+      assert(p.waitqLength == 0)
     }
 
     "not accumulate listeners if not selected" in {
       forAll(genLen, arbitrary[Boolean]) { (n, fail) =>
-        val ps = ((0 until n) map(_ => new Promise[Int])).toList
-        assert(ps.map(_.waitqLength).sum === 0)
+        val ps = List.fill(n)(new Promise[Int]())
+        assert(ps.map(_.waitqLength).sum == 0)
         val f = Future.select(ps)
-        assert(ps.map(_.waitqLength).sum === n)
+        assert(ps.map(_.waitqLength).sum == n)
         val i = Random.nextInt(ps.length)
         val e = new Exception("sad panda")
         val t = if (fail) Throw(e) else Return(i)
-        f respond { _ => () }
-        assert(ps.map(_.waitqLength).sum === n)
+        f.respond { _ =>
+          ()
+        }
+        assert(ps.map(_.waitqLength).sum == n)
         ps(i).update(t)
-        assert(ps.map(_.waitqLength).sum === 0)
+        assert(ps.map(_.waitqLength).sum == 0)
       }
     }
 
@@ -1737,8 +1929,8 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
       val f = Future.select(Nil)
       assert(f.isDefined)
       val e = new IllegalArgumentException("empty future list")
-      val actual = intercept[IllegalArgumentException] { Await.result(f) }
-      assert(actual.getMessage === e.getMessage)
+      val actual = intercept[IllegalArgumentException] { await(f) }
+      assert(actual.getMessage == e.getMessage)
     }
 
     "propagate interrupts" in {
@@ -1754,42 +1946,44 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
     import Arbitrary.arbitrary
     val genLen = Gen.choose(1, 10)
 
-    "return the first result" which {
+    "return the first result" in {
       forAll(genLen, arbitrary[Boolean]) { (n, fail) =>
-        val ps = ((0 until n) map(_ => new Promise[Int])).toIndexedSeq
-        assert(ps.map(_.waitqLength).sum === 0)
+        val ps = IndexedSeq.fill(n)(new Promise[Int]())
+        assert(ps.map(_.waitqLength).sum == 0)
         val f = Future.selectIndex(ps)
         val i = Random.nextInt(ps.length)
         val e = new Exception("sad panda")
         val t = if (fail) Throw(e) else Return(i)
         ps(i).update(t)
         assert(f.isDefined)
-        assert(Await.result(f) === i)
+        assert(await(f) == i)
       }
     }
 
     "not accumulate listeners when losing select" in {
       val p = new Promise[Unit]
       val q = new Promise[Unit]
-      val f = Future.selectIndex(IndexedSeq(p, q))
-      assert(p.waitqLength === 1)
+      Future.selectIndex(IndexedSeq(p, q))
+      assert(p.waitqLength == 1)
       q.setDone()
-      assert(p.waitqLength === 0)
+      assert(p.waitqLength == 0)
     }
 
     "not accumulate listeners if not selected" in {
       forAll(genLen, arbitrary[Boolean]) { (n, fail) =>
-        val ps = ((0 until n) map(_ => new Promise[Int])).toIndexedSeq
-        assert(ps.map(_.waitqLength).sum === 0)
+        val ps = IndexedSeq.fill(n)(new Promise[Int]())
+        assert(ps.map(_.waitqLength).sum == 0)
         val f = Future.selectIndex(ps)
-        assert(ps.map(_.waitqLength).sum === n)
+        assert(ps.map(_.waitqLength).sum == n)
         val i = Random.nextInt(ps.length)
         val e = new Exception("sad panda")
         val t = if (fail) Throw(e) else Return(i)
-        f respond { _ => () }
-        assert(ps.map(_.waitqLength).sum === n)
+        f.respond { _ =>
+          ()
+        }
+        assert(ps.map(_.waitqLength).sum == n)
         ps(i).update(t)
-        assert(ps.map(_.waitqLength).sum === 0)
+        assert(ps.map(_.waitqLength).sum == 0)
       }
     }
 
@@ -1797,12 +1991,12 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
       val f = Future.selectIndex(IndexedSeq.empty)
       assert(f.isDefined)
       val e = new IllegalArgumentException("empty future list")
-      val actual = intercept[IllegalArgumentException] { Await.result(f) }
-      assert(actual.getMessage === e.getMessage)
+      val actual = intercept[IllegalArgumentException] { await(f) }
+      assert(actual.getMessage == e.getMessage)
     }
 
     "propagate interrupts" in {
-      val fs = (0 until 10).map(_ => new HandledPromise[Int])
+      val fs = IndexedSeq.fill(10)(new HandledPromise[Int]())
       Future.selectIndex(fs).raise(new Exception)
       assert(fs.forall(_.handled.isDefined))
     }
@@ -1814,16 +2008,17 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
       var next: Future[Int] = Future.value(10)
       val done = Future.each(next) {
         case 0 => next = Future.exception(exc)
-        case n => next = Future.value(n-1)
+        case n => next = Future.value(n - 1)
       }
 
-      assert(done.poll == Some(Throw(exc)))
+      assert(done.poll.contains(Throw(exc)))
     }
 
     "evaluate next one time per iteration" in {
       var i, j = 0
-      def next() =
-        if (i == 10) Future.exception(new Exception) else {
+      def next(): Future[Int] =
+        if (i == 10) Future.exception(new Exception)
+        else {
           i += 1
           Future.value(i)
         }
@@ -1837,22 +2032,24 @@ class FutureTest extends WordSpec with MockitoSugar with GeneratorDrivenProperty
     "terminate if the body throws an exception" in {
       val exc = new Exception("body exception")
       var i = 0
-      def next() = Future.value({i += 1; i})
+      def next(): Future[Int] = Future.value({ i += 1; i })
       val done = Future.each(next()) {
         case 10 => throw exc
         case _ =>
       }
 
-      assert(done.poll == Some(Throw(exc)))
+      assert(done.poll.contains(Throw(exc)))
       assert(i == 10)
     }
 
     "terminate when 'next' throws" in {
       val exc = new Exception
       def next(): Future[Int] = throw exc
-      val done = Future.each(next()) { _ => throw exc }
+      val done = Future.each(next()) { _ =>
+        throw exc
+      }
 
-      assert(done.poll == Some(Throw(Future.NextThrewException(exc))))
+      assert(done.poll.contains(Throw(Future.NextThrewException(exc))))
     }
   }
 }

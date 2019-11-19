@@ -4,92 +4,93 @@ package com.twitter.io;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.InputStream;
-import com.twitter.concurrent.exp.AsyncStream;
+import java.util.List;
+import java.util.stream.Stream;
+
+import com.twitter.concurrent.AsyncStream;
 import com.twitter.util.Future;
+
+import scala.collection.JavaConverters;
 import scala.runtime.BoxedUnit;
 
 /**
- * Java APIs for Reader.
+ * Better Java APIs of Reader for Scala 2.11.
+ * This will be removed when drop Scala 2.11 support.
  *
  * @see com.twitter.io.Reader
+ * @deprecated This will no longer be necessary when 2.11 support is dropped. 2019-10-04
  */
+@Deprecated
 public final class Readers {
 
   private Readers() { throw new IllegalStateException(); }
 
-  /**
-   * See {@code com.twitter.io.Reader.Null}.
-   */
-  public static final Reader NULL = Reader$.MODULE$.Null();
+  public static <A> Reader<A> newEmptyReader() {
+    return Reader$.MODULE$.<A>empty();
+  }
 
   /**
    * See {@code com.twitter.io.Reader.fromBuf}.
    */
-  public static Reader newBufReader(Buf buf) {
-    return Reader$.MODULE$.fromBuf(buf);
-  }
-
-  /**
-   * See {@code com.twitter.io.Reader.readAll}.
-   */
-  public static Future<Buf> readAll(Reader r) {
-    return Reader$.MODULE$.readAll(r);
+  public static Reader<Buf> newBufReader(Buf buf, int chunkSize) {
+    return Reader$.MODULE$.fromBuf(buf, chunkSize);
   }
 
   /**
    * See {@code com.twitter.io.Reader.concat}.
    */
-  public static Reader concat(AsyncStream<Reader> readers) {
+  public static Reader<Buf> concat(AsyncStream<Reader<Buf>> readers) {
     return Reader$.MODULE$.concat(readers);
   }
 
   /**
-   * See {@code com.twitter.io.Reader.copy}.
+   * See {@code com.twitter.io.Pipe.copy}.
    */
-  public static Future<BoxedUnit> copy(Reader r, Writer w) {
-    return Reader$.MODULE$.copy(r, w);
+  public static Future<BoxedUnit> copy(Reader<Buf> r, Writer<Buf> w) {
+    return Pipe$.MODULE$.copy(r, w);
   }
 
   /**
-   * See {@code com.twitter.io.Reader.copy}.
+   * See {@code com.twitter.io.Pipe.copyMany}.
    */
-  public static Future<BoxedUnit> copy(Reader r, Writer w, int readSize) {
-    return Reader$.MODULE$.copy(r, w, readSize);
-  }
-
-  /**
-   * See {@code com.twitter.io.Reader.copyMany}.
-   */
-  public static Future<BoxedUnit> copyMany(AsyncStream<Reader> readers, Writer w) {
-    return Reader$.MODULE$.copyMany(readers, w);
-  }
-
-  /**
-   * See {@code com.twitter.io.Reader.copyMany}.
-   */
-  public static Future<BoxedUnit> copyMany(AsyncStream<Reader> readers, Writer w, int readSize) {
-    return Reader$.MODULE$.copyMany(readers, w, readSize);
-  }
-
-  /**
-   * See {@code com.twitter.io.Reader.writable()}.
-   */
-  public static Reader.Writable writable() {
-    return Reader$.MODULE$.writable();
+  public static Future<BoxedUnit> copyMany(AsyncStream<Reader<Buf>> readers, Writer<Buf> w) {
+    return Pipe$.MODULE$.copyMany(readers, w);
   }
 
   /**
    * See {@code com.twitter.io.Reader.fromFile()}.
    */
-  public static Reader newFileReader(File f) throws FileNotFoundException {
-    return Reader$.MODULE$.fromFile(f);
+  public static Reader<Buf> newFileReader(File f, int chunkSize) throws FileNotFoundException {
+    return Reader$.MODULE$.fromFile(f, chunkSize);
   }
 
   /**
    * See {@code com.twitter.io.Reader.fromStream()}.
    */
-  public static Reader newInputStreamReader(InputStream in) {
-    return Reader$.MODULE$.fromStream(in);
+  public static Reader<Buf> newInputStreamReader(InputStream in, int chunkSize) {
+    return Reader$.MODULE$.fromStream(in, chunkSize);
   }
 
+  /**
+   * See [[com.twitter.io.Reader$#fromSeq(scala.collection.Seq)]]
+   */
+  public static <A> Reader<A> fromSeq(List<A> list) {
+    return Reader$.MODULE$.fromSeq(JavaConverters.asScalaIteratorConverter(list.iterator())
+      .asScala().toSeq());
+  }
+
+  /**
+   * See [[com.twitter.io.Reader$#fromSeq(scala.collection.Seq)]]
+   */
+  public static <A> Reader<A> fromSeq(Stream<A> stream) {
+    return Reader$.MODULE$.fromSeq(JavaConverters.asScalaIteratorConverter(stream.iterator())
+      .asScala().toSeq());
+  }
+
+  /**
+   * See [[com.twitter.io.Reader#toAsyncStream]]
+   */
+  public static <A> AsyncStream<A> toAsyncStream(Reader<A> reader) {
+    return Reader$.MODULE$.toAsyncStream(reader);
+  }
 }

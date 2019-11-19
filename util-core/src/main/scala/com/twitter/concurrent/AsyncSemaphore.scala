@@ -1,8 +1,11 @@
 package com.twitter.concurrent
 
-import com.twitter.util.{Future, NonFatal, Promise, Throw}
+import com.twitter.util._
 import java.util.ArrayDeque
 import java.util.concurrent.RejectedExecutionException
+import scala.annotation.tailrec
+import scala.collection.JavaConverters._
+import scala.util.control.NonFatal
 
 /**
  * An AsyncSemaphore is a traditional semaphore but with asynchronous
@@ -14,7 +17,7 @@ import java.util.concurrent.RejectedExecutionException
  * {{{
  *   val semaphore = new AsyncSemaphore(n)
  *   ...
- *   semaphore.acquireAndRun() {
+ *   semaphore.acquireAndRun {
  *     somethingThatReturnsFutureT()
  *   }
  * }}}
@@ -47,58 +50,93 @@ class AsyncSemaphore protected (initialPermits: Int, maxWaiters: Option[Int]) {
   require(maxWaiters.getOrElse(0) >= 0, s"maxWaiters must be non-negative: $maxWaiters")
   require(initialPermits > 0, s"initialPermits must be positive: $initialPermits")
 
+  // access to `closed`, `waitq`, and `availablePermits` is synchronized
+  // by locking on `lock`
+  private[this] var closed: Option[Throwable] = None
   private[this] val waitq = new ArrayDeque[Promise[Permit]]
   private[this] var availablePermits = initialPermits
 
-  private[this] class SemaphorePermit extends Permit {
-    /**
-     * Indicate that you are done with your Permit.
-     */
-    override def release() {
-      AsyncSemaphore.this.synchronized {
+  // Serves as our intrinsic lock.
+  private[this] final def lock: Object = waitq
+
+  private[this] val semaphorePermit = new Permit {
+    private[this] val ReturnThis = Return(this)
+
+    @tailrec override def release(): Unit = {
+      val waiter = lock.synchronized {
         val next = waitq.pollFirst()
-        if (next != null)
-          next.setValue(new SemaphorePermit)
-        else
+        if (next == null) {
           availablePermits += 1
+        }
+        next
+      }
+
+      if (waiter != null) {
+        // If the waiter is already satisfied, it must
+        // have been interrupted, so we can simply move on.
+        if (!waiter.updateIfEmpty(ReturnThis)) {
+          release()
+        }
       }
     }
   }
 
-  def numWaiters: Int = synchronized(waitq.size)
-  def numPermitsAvailable: Int = synchronized(availablePermits)
+  private[this] val futurePermit = Future.value(semaphorePermit)
+
+  def numWaiters: Int = lock.synchronized(waitq.size)
+  def numInitialPermits: Int = initialPermits
+  def numPermitsAvailable: Int = lock.synchronized(availablePermits)
 
   /**
-   * Acquire a Permit, asynchronously. Be sure to permit.release() in a 'finally'
-   * block of your onSuccess() callback.
+   * Fail the semaphore and stop it from distributing further permits. Subsequent
+   * attempts to acquire a permit fail with `exc`. This semaphore's queued waiters
+   * are also failed with `exc`.
+   */
+  def fail(exc: Throwable): Unit = {
+    val drained = lock.synchronized {
+      closed = Some(exc)
+      waitq.asScala.toList
+    }
+    // delegate dequeuing to the interrupt handler defined in #acquire
+    drained.foreach(_.raise(exc))
+  }
+
+  /**
+   * Acquire a [[Permit]], asynchronously. Be sure to `permit.release()` in a
+   *
+   * - `finally` block of your `onSuccess` callback
+   * - `ensure` block of your future chain
    *
    * Interrupting this future is only advisory, and will not release the permit
    * if the future has already been satisfied.
    *
-   * @return a Future[Permit] when the Future is satisfied, computation can proceed,
-   * or a Future.Exception[RejectedExecutionException] if the configured maximum number of waitq
-   * would be exceeded.
+   * @note This method always return the same instance of [[Permit]].
+   *
+   * @return a `Future[Permit]` when the `Future` is satisfied, computation can proceed,
+   *         or a Future.Exception[RejectedExecutionException]` if the configured maximum
+   *         number of waiters would be exceeded.
    */
-  def acquire(): Future[Permit] = {
-    synchronized {
-      if (availablePermits > 0) {
-        availablePermits -= 1
-        Future.value(new SemaphorePermit)
-      } else {
-        maxWaiters match {
-          case Some(max) if (waitq.size >= max) =>
-            MaxWaitersExceededException
-          case _ =>
-            val promise = new Promise[Permit]
-            promise.setInterruptHandler { case t: Throwable =>
-              AsyncSemaphore.this.synchronized {
-                if (promise.updateIfEmpty(Throw(t)))
-                  waitq.remove(promise)
+  def acquire(): Future[Permit] = lock.synchronized {
+    if (closed.isDefined)
+      return Future.exception(closed.get)
+
+    if (availablePermits > 0) {
+      availablePermits -= 1
+      futurePermit
+    } else {
+      maxWaiters match {
+        case Some(max) if waitq.size >= max =>
+          MaxWaitersExceededException
+        case _ =>
+          val promise = new Promise[Permit]
+          promise.setInterruptHandler {
+            case t: Throwable =>
+              if (promise.updateIfEmpty(Throw(t))) lock.synchronized {
+                waitq.remove(promise)
               }
-            }
-            waitq.addLast(promise)
-            promise
-        }
+          }
+          waitq.addLast(promise)
+          promise
       }
     }
   }
@@ -113,20 +151,20 @@ class AsyncSemaphore protected (initialPermits: Int, maxWaiters: Option[Int]) {
    *         maximum value of waitq is reached, Future.Exception[RejectedExecutionException] is
    *         returned.
    */
-  def acquireAndRun[T](func: => Future[T]): Future[T] = {
-    acquire() flatMap { permit =>
-      val f = try func catch {
+  def acquireAndRun[T](func: => Future[T]): Future[T] =
+    acquire().flatMap { permit =>
+      val f = try func
+      catch {
         case NonFatal(e) =>
           Future.exception(e)
         case e: Throwable =>
           permit.release()
           throw e
       }
-      f ensure {
+      f.ensure {
         permit.release()
       }
     }
-  }
 
   /**
    * Execute the function when a permit becomes available.
@@ -138,13 +176,12 @@ class AsyncSemaphore protected (initialPermits: Int, maxWaiters: Option[Int]) {
    *         maximum value of waitq is reached, Future.Exception[RejectedExecutionException] is
    *         returned.
    */
-  def acquireAndRunSync[T](func: => T): Future[T] = {
-    acquire() flatMap { permit =>
-      Future(func) ensure {
+  def acquireAndRunSync[T](func: => T): Future[T] =
+    acquire().flatMap { permit =>
+      Future(func).ensure {
         permit.release()
       }
     }
-  }
 }
 
 object AsyncSemaphore {

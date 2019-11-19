@@ -1,14 +1,11 @@
 package com.twitter.zk
 
-import org.junit.runner.RunWith
 import org.mockito.Mockito._
 import org.scalatest.WordSpec
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.mock.MockitoSugar
+import org.scalatestplus.mockito.MockitoSugar
 
 import com.twitter.util.Future
 
-@RunWith(classOf[JUnitRunner])
 class ConnectorTest extends WordSpec with MockitoSugar {
   "Connector.RoundRobin" should {
     "require underlying connections" in {
@@ -26,7 +23,9 @@ class ConnectorTest extends WordSpec with MockitoSugar {
           connector
         }
         val nConnectors = 3
-        val connectors = 1 to nConnectors map { _ => mockConnector }
+        val connectors = 1 to nConnectors map { _ =>
+          mockConnector
+        }
         val connector = Connector.RoundRobin(connectors: _*)
       }
 
@@ -35,7 +34,7 @@ class ConnectorTest extends WordSpec with MockitoSugar {
         import h._
 
         connectors foreach { x =>
-          assert(x.apply() === Future.never)
+          assert(x.apply() == Future.never)
         }
         (1 to 2 * nConnectors) foreach { _ =>
           connector()
@@ -50,7 +49,7 @@ class ConnectorTest extends WordSpec with MockitoSugar {
         import h._
 
         connectors foreach { x =>
-          assert(x.release() === Future.never)
+          assert(x.release() == Future.never)
         }
         (1 to 2) foreach { _ =>
           connector.release()

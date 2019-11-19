@@ -9,7 +9,7 @@ import com.twitter.util.{Future, Promise, Return}
 object SpoolSource {
   private object DefaultInterruptHandler extends PartialFunction[Any, Nothing] {
     def isDefinedAt(x: Any) = false
-    def apply(x: Any) = throw new MatchError(x)
+    def apply(x: Any): Nothing = throw new MatchError(x)
   }
 }
 
@@ -51,26 +51,28 @@ class SpoolSource[A](interruptHandler: PartialFunction[Throwable, Unit]) {
    * If multiple threads call `offer` simultaneously, the operation is thread-safe but
    * the resulting order of values in the spool is non-deterministic.
    */
-  final def offer(value: A) {
+  final def offer(value: A): Unit = {
+
     val nextPromise = new Promise[Spool[A]]
     nextPromise.setInterruptHandler(interruptHandler)
     updatingTailCall(nextPromise) { currentPromise =>
-      currentPromise.setValue(Spool.cons(value, nextPromise))
+      currentPromise.setValue(value *:: nextPromise)
     }
   }
 
   /**
    * Puts a value into the spool and closes this SpoolSource.  Unless
    * this SpoolSource has been closed, the current Future[Spool[A]]
-   * value will be fulfilled with Spool.cons(value, Spool.empty[A]).
+   * value will be fulfilled with `value *:: Future.value(Spool.empty[A])`.
    * If the SpoolSource has been closed, then this value is ignored.
    * If multiple threads call offer simultaneously, the operation is
    * thread-safe but the resulting order of values in the spool is
    * non-deterministic.
    */
-  final def offerAndClose(value: A) {
+  final def offerAndClose(value: A): Unit = {
+
     updatingTailCall(emptyPromise) { currentPromise =>
-      currentPromise.setValue(Spool.cons(value, Spool.empty[A]))
+      currentPromise.setValue(value *:: Future.value(Spool.empty[A]))
       closedp.setDone()
     }
   }
@@ -79,7 +81,7 @@ class SpoolSource[A](interruptHandler: PartialFunction[Throwable, Unit]) {
    * Closes this SpoolSource, which also terminates the generated Spool.  This method
    * is idempotent.
    */
-  final def close() {
+  final def close(): Unit = {
     updatingTailCall(emptyPromise) { currentPromise =>
       currentPromise.setValue(Spool.empty[A])
       closedp.setDone()
@@ -96,7 +98,7 @@ class SpoolSource[A](interruptHandler: PartialFunction[Throwable, Unit]) {
    * Raises exception on this SpoolSource, which also terminates the generated Spool.  This method
    * is idempotent.
    */
-  final def raise(e: Throwable) {
+  final def raise(e: Throwable): Unit = {
     updatingTailCall(emptyPromise) { currentPromise =>
       currentPromise.setException(e)
       closedp.setException(e)
@@ -104,7 +106,10 @@ class SpoolSource[A](interruptHandler: PartialFunction[Throwable, Unit]) {
   }
 
   @tailrec
-  private[this] def updatingTailCall(newPromise: Promise[Spool[A]])(f: Promise[Spool[A]] => Unit) {
+  private[this] def updatingTailCall(
+    newPromise: Promise[Spool[A]]
+  )(f: Promise[Spool[A]] => Unit
+  ): Unit = {
     val currentPromise = promiseRef.get
     // if the current promise is emptyPromise, then this source has already been closed
     if (currentPromise ne emptyPromise) {

@@ -5,7 +5,7 @@
  * not use this file except in compliance with the License. You may obtain
  * a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *     https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,19 +17,20 @@
 package com.twitter.logging
 
 import com.twitter.util.TwitterDateFormat
-
 import java.text.{MessageFormat, DateFormat}
 import java.util.regex.Pattern
 import java.util.{Date, GregorianCalendar, TimeZone, logging => javalog}
-
 import scala.collection.mutable
+import java.{util => ju}
 
 private[logging] object Formatter {
   // FIXME: might be nice to unmangle some scala names here.
   private[logging] def formatStackTrace(t: Throwable, limit: Int): List[String] = {
     var out = new mutable.ListBuffer[String]
     if (limit > 0) {
-      out ++= t.getStackTrace.map { elem => "    at %s".format(elem.toString) }
+      out ++= t.getStackTrace.map { elem =>
+        "    at %s".format(elem.toString)
+      }
       if (out.length > limit) {
         out.trimEnd(out.length - limit)
         out += "    (...more...)"
@@ -42,7 +43,7 @@ private[logging] object Formatter {
     out.toList
   }
 
-  val DateFormatRegex = Pattern.compile("<([^>]+)>")
+  val DateFormatRegex: Pattern = Pattern.compile("<([^>]+)>")
   val DefaultStackTraceSizeLimit = 30
   val DefaultPrefix = "%.3s [<yyyyMMdd-HH:mm:ss.SSS>] %s: "
 }
@@ -86,16 +87,18 @@ private[logging] object Formatter {
  *     "ERR [20080315-18:39:05.033] jobs: "
  */
 class Formatter(
-    val timezone: Option[String] = None,
-    val truncateAt: Int = 0,
-    val truncateStackTracesAt: Int = Formatter.DefaultStackTraceSizeLimit,
-    val useFullPackageNames: Boolean = false,
-    val prefix: String = Formatter.DefaultPrefix)
-  extends javalog.Formatter {
+  val timezone: Option[String] = None,
+  val truncateAt: Int = 0,
+  val truncateStackTracesAt: Int = Formatter.DefaultStackTraceSizeLimit,
+  val useFullPackageNames: Boolean = false,
+  val prefix: String = Formatter.DefaultPrefix)
+    extends javalog.Formatter {
 
   private val matcher = Formatter.DateFormatRegex.matcher(prefix)
 
-  private val DATE_FORMAT = TwitterDateFormat(if (matcher.find()) matcher.group(1) else "yyyyMMdd-HH:mm:ss.SSS")
+  private val DATE_FORMAT = TwitterDateFormat(
+    if (matcher.find()) matcher.group(1) else "yyyyMMdd-HH:mm:ss.SSS"
+  )
   private val FORMAT = matcher.replaceFirst("%3\\$s")
 
   /**
@@ -106,7 +109,7 @@ class Formatter(
   /**
    * Calendar to use for time zone display in date-time formatting.
    */
-  val calendar = if (timezone.isDefined) {
+  val calendar: ju.GregorianCalendar = if (timezone.isDefined) {
     new GregorianCalendar(TimeZone.getTimeZone(timezone.get))
   } else {
     new GregorianCalendar
@@ -157,10 +160,9 @@ class Formatter(
 
       if (record.getThrown ne null) {
         val traceLines = Formatter.formatStackTrace(record.getThrown, truncateStackTracesAt)
-        if (!traceLines.isEmpty) {
-          lines += record.getThrown.toString
+        lines += record.getThrown.toString
+        if (traceLines.nonEmpty)
           lines ++= traceLines
-        }
       }
       lines.toArray
     }
@@ -218,7 +220,7 @@ class Formatter(
   /**
    * Truncates the text from a java LogRecord, if necessary
    */
-  def truncateText(message: String) =
+  def truncateText(message: String): String =
     if ((truncateAt > 0) && (message.length > truncateAt))
       message.take(truncateAt) + "..."
     else
@@ -229,5 +231,5 @@ class Formatter(
  * Formatter that logs only the text of a log message, with no prefix (no date, etc).
  */
 object BareFormatter extends Formatter {
-  override def format(record: javalog.LogRecord) = formatText(record) + lineTerminator
+  override def format(record: javalog.LogRecord): String = formatText(record) + lineTerminator
 }

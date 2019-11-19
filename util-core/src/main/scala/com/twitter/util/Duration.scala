@@ -5,26 +5,30 @@ import java.util.concurrent.TimeUnit
 
 object Duration extends TimeLikeOps[Duration] {
 
-  def fromNanoseconds(nanoseconds: Long): Duration = new Duration(nanoseconds)
+  def fromNanoseconds(nanoseconds: Long): Duration =
+    if (nanoseconds == 0L) Zero
+    else new Duration(nanoseconds)
 
   // This is needed for Java compatibility.
-  override def fromFractionalSeconds(seconds: Double): Duration = super.fromFractionalSeconds(seconds)
+  override def fromFractionalSeconds(seconds: Double): Duration =
+    super.fromFractionalSeconds(seconds)
   override def fromSeconds(seconds: Int): Duration = super.fromSeconds(seconds)
+  override def fromMinutes(minutes: Int): Duration = super.fromMinutes(minutes)
   override def fromMilliseconds(millis: Long): Duration = super.fromMilliseconds(millis)
   override def fromMicroseconds(micros: Long): Duration = super.fromMicroseconds(micros)
 
-  val NanosPerMicrosecond = 1000L
-  val NanosPerMillisecond = NanosPerMicrosecond * 1000L
-  val NanosPerSecond = NanosPerMillisecond * 1000L
-  val NanosPerMinute = NanosPerSecond * 60
-  val NanosPerHour = NanosPerMinute * 60
-  val NanosPerDay = NanosPerHour * 24
+  val NanosPerMicrosecond: Long = 1000L
+  val NanosPerMillisecond: Long = NanosPerMicrosecond * 1000L
+  val NanosPerSecond: Long = NanosPerMillisecond * 1000L
+  val NanosPerMinute: Long = NanosPerSecond * 60
+  val NanosPerHour: Long = NanosPerMinute * 60
+  val NanosPerDay: Long = NanosPerHour * 24
 
   /**
    * Create a duration from a [[java.util.concurrent.TimeUnit]].
    * Synonym for `apply`.
    */
-  def fromTimeUnit(value: Long, unit: TimeUnit) = apply(value, unit)
+  def fromTimeUnit(value: Long, unit: TimeUnit): Duration = apply(value, unit)
 
   /**
    * Create a duration from a [[java.util.concurrent.TimeUnit]].
@@ -34,8 +38,8 @@ object Duration extends TimeLikeOps[Duration] {
     fromNanoseconds(ns)
   }
 
-  @deprecated("use time.untilNow", "2011-05-03") // date is a guess
-  def since(time: Time) = Time.now.since(time)
+  // This is needed for Java compatibility.
+  override val Zero: Duration = new Duration(0)
 
   /**
    * Duration `Top` is greater than any other duration, except for
@@ -50,13 +54,18 @@ object Duration extends TimeLikeOps[Duration] {
       else if (that eq Top) 0
       else 1
 
+    override def equals(other: Any) = other match {
+      case d: Duration => d eq this
+      case _ => false
+    }
+
     override def *(x: Long): Duration =
       if (x == 0) Undefined
       else if (x < 0) Bottom
       else Top
 
     override def *(x: Double): Duration =
-      if (x == 0.0) Undefined
+      if (x == 0.0 || java.lang.Double.isNaN(x)) Undefined
       else if (x < 0.0) Bottom
       else Top
 
@@ -66,7 +75,7 @@ object Duration extends TimeLikeOps[Duration] {
       else Top
 
     override def /(x: Double): Duration =
-      if (x == 0.0) Undefined
+      if (x == 0.0 || java.lang.Double.isNaN(x)) Undefined
       else if (x < 0.0) Bottom
       else Top
 
@@ -97,6 +106,11 @@ object Duration extends TimeLikeOps[Duration] {
     /** Bottom is equal to Bottom, but smaller than everything else */
     override def compare(that: Duration) = if (this eq that) 0 else -1
 
+    override def equals(other: Any) = other match {
+      case d: Duration => d eq this
+      case _ => false
+    }
+
     /** Scaling arithmetic is Bottom preserving. */
     override def *(x: Long): Duration =
       if (x == 0) Undefined
@@ -104,7 +118,7 @@ object Duration extends TimeLikeOps[Duration] {
       else Bottom
 
     override def *(x: Double): Duration =
-      if (x == 0.0) Undefined
+      if (x == 0.0 || java.lang.Double.isNaN(x)) Undefined
       else if (x < 0.0) Top
       else Bottom
 
@@ -114,7 +128,7 @@ object Duration extends TimeLikeOps[Duration] {
       else Bottom
 
     override def /(x: Double): Duration =
-      if (x == 0.0) Undefined
+      if (x == 0.0 || java.lang.Double.isNaN(x)) Undefined
       else if (x < 0.0) Top
       else Bottom
 
@@ -143,6 +157,11 @@ object Duration extends TimeLikeOps[Duration] {
 
     override def compare(that: Duration) = if (this eq that) 0 else 1
 
+    override def equals(other: Any) = other match {
+      case d: Duration => d eq this
+      case _ => false
+    }
+
     override def *(x: Long): Duration = this
     override def *(x: Double): Duration = this
     override def /(x: Long): Duration = this
@@ -161,41 +180,6 @@ object Duration extends TimeLikeOps[Duration] {
     private def writeReplace(): Object = DurationBox.Undefined()
   }
 
-  @deprecated("use Duration.Zero", "5.4.0")
-  val zero: Duration = Zero
-  /** Synonym to `Top` */
-  @deprecated("use Duration.Top", "5.4.0")
-  val forever: Duration = Top
-  /** Synonym to `Top` */
-  @deprecated("use Duration.Top", "5.4.0")
-  val eternity: Duration = Top
-  @deprecated("Use Duration.Top", "5.4.0")
-  val MaxValue: Duration = Top
-  @deprecated("Use Duration.Zero", "5.4.0")
-  val MinValue: Duration = Zero
-
-  /**
-   * Returns how long it took, in millisecond granularity, to run the function f.
-   */
-  @deprecated("use Stopwatch instead", "5.4.0")
-  def inMilliseconds[T](f: => T): (T, Duration) = {
-    val start = Time.now
-    val rv = f
-    val duration = Time.now - start
-    (rv, duration)
-  }
-
-  /**
-   * Returns how long it took, in nanosecond granularity, to run the function f.
-   */
-  @deprecated("Use Stopwatch", "5.4.0")
-  def inNanoseconds[T](f: => T): (T, Duration) = {
-    val start = System.nanoTime
-    val rv = f
-    val duration = fromNanoseconds(System.nanoTime - start)
-    (rv, duration)
-  }
-
   private val timeUnits = Seq(
     TimeUnit.DAYS,
     TimeUnit.HOURS,
@@ -203,14 +187,18 @@ object Duration extends TimeLikeOps[Duration] {
     TimeUnit.SECONDS,
     TimeUnit.MILLISECONDS,
     TimeUnit.MICROSECONDS,
-    TimeUnit.NANOSECONDS)
+    TimeUnit.NANOSECONDS
+  )
 
   private val nameToUnit: Map[String, TimeUnit] =
-    TimeUnit.values().flatMap { u =>
-      val pluralK = u.toString.toLowerCase
-      val singularK = pluralK dropRight 1
-      Seq(pluralK -> u, singularK -> u)
-    }.toMap
+    TimeUnit
+      .values()
+      .flatMap { u =>
+        val pluralK = u.toString.toLowerCase
+        val singularK = pluralK dropRight 1
+        Seq(pluralK -> u, singularK -> u)
+      }
+      .toMap
 
   private val SingleDurationRegex =
     """\s*([+-]?)\s*(?:([0-9]+)\.([a-z]+)|duration\.(top|bottom|undefined))""".r
@@ -235,7 +223,7 @@ object Duration extends TimeLikeOps[Duration] {
    *
    * @throws RuntimeException if the string cannot be parsed.
    */
-  def parse(s: String) = {
+  def parse(s: String): Duration = {
     val ss = s.toLowerCase
     ss match {
       case FullDurationRegex(_*) =>
@@ -243,29 +231,29 @@ object Duration extends TimeLikeOps[Duration] {
           case (m, i) =>
             val List(signStr, numStr, unitStr, special) = m.subgroups
             val absDuration = special match {
-              case "top"       => Top
-              case "bottom"    => Bottom
+              case "top" => Top
+              case "bottom" => Bottom
               case "undefined" => Undefined
-              case _           =>
+              case _ =>
                 val u = nameToUnit.get(unitStr) match {
                   case Some(t) => t
-                  case None    => throw new NumberFormatException("Invalid unit: " + unitStr)
+                  case None => throw new NumberFormatException("Invalid unit: " + unitStr)
                 }
                 Duration(numStr.toLong, u)
             }
 
             signStr match {
-              case "-"         => -absDuration
+              case "-" => -absDuration
 
               // It's only OK to omit the sign for the first duration.
               case "" if i > 0 =>
                 throw new NumberFormatException("Expected a sign between durations")
 
-              case _           => absDuration
+              case _ => absDuration
             }
 
-        // It's OK to use reduce because the regex ensures that there is
-        // at least one element
+          // It's OK to use reduce because the regex ensures that there is
+          // at least one element
         } reduce { _ + _ }
       case _ => throw new NumberFormatException("Invalid duration: " + s)
     }
@@ -302,7 +290,7 @@ private[util] object DurationBox {
  * using the time conversions:
  *
  * {{{
- * import com.twitter.conversions.time._
+ * import com.twitter.conversions.DurationOps._
  *
  * 3.days+4.nanoseconds
  * }}}
@@ -317,11 +305,11 @@ private[util] object DurationBox {
  * that are truly infinite; for example the absence of a timeout.
  */
 sealed class Duration private[util] (protected val nanos: Long) extends {
-  protected val ops = Duration
+  protected val ops: Duration.type = Duration
 } with TimeLike[Duration] with Serializable {
   import ops._
 
-  def inNanoseconds = nanos
+  def inNanoseconds: Long = nanos
 
   /**
    * Returns the length of the duration in the given TimeUnit.
@@ -337,7 +325,7 @@ sealed class Duration private[util] (protected val nanos: Long) extends {
    *
    * - loses no information
    * - is easy to read
-   * - can be read back in if com.twitter.conversions.time._ is imported
+   * - can be read back in if com.twitter.conversions.DurationOps._ is imported
    *
    * An example:
    *
@@ -365,19 +353,39 @@ sealed class Duration private[util] (protected val nanos: Long) extends {
     s.toString()
   }
 
-  override def equals(other: Any) = other match {
-    case d: Duration => (this compare d) == 0
-    case _ => false
+  override def equals(other: Any): Boolean = {
+    // in order to ensure that the sentinels are only equal
+    // to themselves, we need to make sure we only compare nanos
+    // when both instances are `Duration`s and not a sentinel subclass.
+    if (other != null && (other.getClass eq getClass)) {
+      other.asInstanceOf[Duration].nanos == nanos
+    } else {
+      false
+    }
   }
 
-  override def hashCode = nanos.hashCode
+  override def hashCode: Int =
+    // inline java.lang.Long.hashCode to avoid the BoxesRunTime.boxToLong
+    // and then Long.hashCode code.
+    (nanos ^ (nanos >>> 32)).toInt
 
   /**
    * Scales this `Duration` by multiplying by `x`.
    */
-  def *(x: Long) = try fromNanoseconds(LongOverflowArith.mul(nanos, x)) catch {
-    case _: LongOverflowException if nanos < 0 == x < 0 => Top
-    case _: LongOverflowException => Bottom
+  def *(x: Long): Duration = {
+    def overflowedDuration(a: Long, b: Long): Duration =
+      if ((a < 0) == (b < 0)) Duration.Top else Duration.Bottom
+
+    // a < b
+    def multiplyNanos(a: Long, b: Long): Duration =
+      if (a < 0L)
+        if (b < 0L && a < Long.MaxValue / b) overflowedDuration(a, b)
+        else if (b > 0L && Long.MinValue / b > a) overflowedDuration(a, b)
+        else Duration.fromNanoseconds(a * b)
+      else if (a > 0L && a > Long.MaxValue / b) overflowedDuration(a, b)
+      else Duration.fromNanoseconds(a * b)
+
+    if (nanos > x) multiplyNanos(x, nanos) else multiplyNanos(nanos, x)
   }
 
   /**
@@ -408,35 +416,36 @@ sealed class Duration private[util] (protected val nanos: Long) extends {
    */
   def /(x: Double): Duration =
     if (x == 0.0) this / 0
-    else this * (1.0/x)
+    else this * (1.0 / x)
 
   /**
    * Scales this `Duration` by modding by `x`.
    */
   def %(x: Duration): Duration = x match {
-    case Undefined | Nanoseconds(0) => Undefined
-    case Nanoseconds(ns) => fromNanoseconds(nanos % ns)
+    case Undefined => Undefined
+    case ns if ns.isZero => Undefined
+    case ns if ns.isFinite => fromNanoseconds(nanos % ns.inNanoseconds)
     case Top | Bottom => this
   }
 
   /**
    * Converts negative durations to positive durations.
    */
-  def abs = if (nanos < 0) -this else this
+  def abs: Duration = if (nanos < 0) -this else this
 
-  def fromNow = Time.now + this
-  def ago = Time.now - this
-  def afterEpoch = Time.epoch + this
+  def fromNow: Time = Time.now + this
+  def ago: Time = Time.now - this
+  def afterEpoch: Time = Time.epoch + this
 
   // Note that Long.MinValue receives special treatment here because
   // of two's complement: -Long.MinValue == Long.MinValue.
-  def unary_-  =
+  def unary_- : Duration =
     if (inNanoseconds == Long.MinValue) Top
     else ops.fromNanoseconds(-inNanoseconds)
 
-  def diff(that: Duration) = this - that
+  def diff(that: Duration): Duration = this - that
 
-  def isFinite = true
+  def isFinite: Boolean = true
 
   private def writeReplace(): Object = DurationBox.Finite(inNanoseconds)
 
@@ -480,5 +489,7 @@ sealed class Duration private[util] (protected val nanos: Long) extends {
    */
   def rem(x: Duration): Duration = this % x
 
-  override def floor(x: Duration): Duration = super.floor(x) // for Java-compatibility
+  // for Java-compatibility
+  override def floor(increment: Duration): Duration = super.floor(increment)
+  override def ceil(increment: Duration): Duration = super.ceil(increment)
 }

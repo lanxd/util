@@ -5,15 +5,29 @@ package com.twitter.finagle.stats
  * names according to a `translate` function.
  *
  * @param self The underlying StatsReceiver to which translated names are passed
+ *
+ * @param namespacePrefix the namespace used for translations
  */
-abstract class NameTranslatingStatsReceiver(val self: StatsReceiver)
-  extends StatsReceiver
-{
-  protected[this] def translate(name: Seq[String]): Seq[String]
-  val repr = self.repr
-  override def isNull = self.isNull
+abstract class NameTranslatingStatsReceiver(
+  protected val self: StatsReceiver,
+  namespacePrefix: String)
+    extends StatsReceiverProxy {
 
-  def counter(name: String*) = self.counter(translate(name): _*)
-  def stat(name: String*)    = self.stat(translate(name): _*)
-  def addGauge(name: String*)(f: => Float) = self.addGauge(translate(name): _*)(f)
+  def this(self: StatsReceiver) = this(self, "<namespacePrefix>")
+
+  protected def translate(name: Seq[String]): Seq[String]
+
+  override def counter(verbosity: Verbosity, name: String*): Counter =
+    self.counter(verbosity, translate(name): _*)
+
+  override def stat(verbosity: Verbosity, name: String*): Stat =
+    self.stat(verbosity, translate(name): _*)
+
+  override def addGauge(verbosity: Verbosity, name: String*)(f: => Float): Gauge = {
+    // scalafix:off StoreGaugesAsMemberVariables
+    self.addGauge(verbosity, translate(name): _*)(f)
+    // scalafix:on StoreGaugesAsMemberVariables
+  }
+
+  override def toString: String = s"$self/$namespacePrefix"
 }
